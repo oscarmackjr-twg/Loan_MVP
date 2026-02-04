@@ -1,0 +1,50 @@
+"""Application configuration and settings."""
+from pydantic_settings import BaseSettings
+from typing import Optional
+import os
+from pathlib import Path
+
+
+class Settings(BaseSettings):
+    """Application settings loaded from environment variables."""
+    
+    # Database
+    DATABASE_URL: str = "postgresql://postgres:postgres@localhost:5432/loan_engine"
+    
+    # Security
+    SECRET_KEY: str = "your-secret-key-change-in-production"
+    ALGORITHM: str = "HS256"
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
+    
+    # File Storage
+    INPUT_DIR: str = "./data/inputs"
+    OUTPUT_DIR: str = "./data/outputs"
+    OUTPUT_SHARE_DIR: str = "./data/output_share"
+    
+    # Pipeline
+    IRR_TARGET: float = 8.05
+    DEFAULT_PDATE: Optional[str] = None
+    
+    # Scheduler
+    ENABLE_SCHEDULER: bool = True
+    DAILY_RUN_TIME: str = "02:00"  # 2 AM
+    
+    # CORS
+    CORS_ORIGINS: list[str] = ["http://localhost:5173", "http://localhost:3000"]
+    
+    # Logging
+    LOG_LEVEL: str = "INFO"
+    LOG_FILE: Optional[str] = None
+    
+    class Config:
+        env_file = ".env"
+        env_file_encoding = "utf-8"
+        case_sensitive = True
+        # Ignore .env file parsing errors (use defaults if file has issues)
+        env_ignore_empty = True
+
+
+# Load settings
+# Note: If .env file has parsing errors, pydantic-settings will show a warning
+# but the application will still start using defaults and environment variables
+settings = Settings()
