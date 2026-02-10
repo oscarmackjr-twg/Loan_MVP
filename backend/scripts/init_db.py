@@ -26,7 +26,7 @@ def init_database(drop_existing: bool = False):
     print(f"Connecting to database: {settings.DATABASE_URL.split('@')[-1] if '@' in settings.DATABASE_URL else settings.DATABASE_URL}")
     
     if drop_existing:
-        print("⚠️  WARNING: Dropping all existing tables...")
+        print("WARNING: Dropping all existing tables...")
         response = input("This will delete all data. Continue? (yes/no): ")
         if response.lower() != 'yes':
             print("Aborted.")
@@ -40,7 +40,7 @@ def init_database(drop_existing: bool = False):
         print("Creating database tables...")
         Base.metadata.create_all(bind=engine)
         
-        print("✅ Database tables created successfully!")
+        print("Database tables created successfully!")
         print("\nTables created:")
         for table_name in Base.metadata.tables.keys():
             print(f"  - {table_name}")
@@ -53,7 +53,7 @@ def init_database(drop_existing: bool = False):
         print("   python scripts/seed_admin.py")
         
     except Exception as e:
-        print(f"❌ Error initializing database: {e}")
+        print(f"Error initializing database: {e}")
         raise
 
 

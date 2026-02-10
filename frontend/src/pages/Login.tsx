@@ -1,4 +1,5 @@
-import { useState, FormEvent } from 'react'
+import { useState, FormEvent, useEffect } from 'react'
+import axios from 'axios'
 import { useAuth } from '../contexts/AuthContext'
 import { useNavigate } from 'react-router-dom'
 
@@ -7,19 +8,38 @@ export default function Login() {
   const [password, setPassword] = useState('')
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
+  const [backendStatus, setBackendStatus] = useState<'checking' | 'ok' | 'error'>('checking')
   const { login } = useAuth()
   const navigate = useNavigate()
+
+  useEffect(() => {
+    axios
+      .get('/health')
+      .then(() => setBackendStatus('ok'))
+      .catch(() => setBackendStatus('error'))
+  }, [])
 
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault()
     setError('')
     setLoading(true)
+    const trimmedUsername = username.trim()
+    const trimmedPassword = password
 
     try {
-      await login(username, password)
+      await login(trimmedUsername, trimmedPassword)
       navigate('/dashboard')
     } catch (err: any) {
-      setError(err.response?.data?.detail || 'Login failed')
+      const res = err.response
+      let message = 'Login failed'
+      if (res?.data?.detail != null) {
+        message = Array.isArray(res.data.detail) ? res.data.detail.map((d: any) => d.msg || JSON.stringify(d)).join(', ') : String(res.data.detail)
+      } else if (res?.status) {
+        message = `Login failed (${res.status}${res.statusText ? ` ${res.statusText}` : ''})`
+      } else if (err.message) {
+        message = err.message
+      }
+      setError(message)
     } finally {
       setLoading(false)
     }
@@ -34,6 +54,11 @@ export default function Login() {
           </h2>
           <p className="mt-2 text-center text-sm text-gray-600">
             Sign in to your account
+          </p>
+          <p className="mt-1 text-center text-xs text-gray-500" aria-live="polite">
+            {backendStatus === 'checking' && 'Checking backend…'}
+            {backendStatus === 'ok' && 'Backend connected'}
+            {backendStatus === 'error' && 'Backend unreachable — check API URL and network'}
           </p>
         </div>
         <form className="mt-8 space-y-6" onSubmit={handleSubmit}>

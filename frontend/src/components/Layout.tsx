@@ -9,6 +9,7 @@ export default function Layout() {
     { path: '/dashboard', label: 'Dashboard' },
     { path: '/runs', label: 'Pipeline Runs' },
     { path: '/exceptions', label: 'Exceptions' },
+    { path: '/rejected-loans', label: 'Rejected Loans' },
   ]
 
   return (

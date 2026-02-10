@@ -22,8 +22,26 @@ from config.settings import settings
 from utils.date_utils import calculate_pipeline_dates
 from utils.file_discovery import discover_input_files
 from utils.path_utils import get_sales_team_output_path, get_sales_team_share_path
+from utils.json_serial import to_json_safe
+from config.rejection_criteria import (
+    get_rejection_criteria,
+    DISPOSITION_TO_PURCHASE,
+    DISPOSITION_PROJECTED,
+    DISPOSITION_REJECTED,
+)
 
 logger = logging.getLogger(__name__)
+
+WEEKDAY_NAMES = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
+
+
+def _weekday_from_pdate(pdate: str):
+    """Return (weekday_index 0-6, weekday_name) from pdate YYYY-MM-DD."""
+    try:
+        dt = datetime.strptime(pdate, "%Y-%m-%d")
+        return dt.weekday(), WEEKDAY_NAMES[dt.weekday()]
+    except (ValueError, TypeError):
+        return None, None
 
 
 class PipelineExecutor:
@@ -118,7 +136,8 @@ class PipelineExecutor:
         return files
     
     def create_run_record(self) -> PipelineRun:
-        """Create pipeline run record in database."""
+        """Create pipeline run record in database (with day-of-week from pdate)."""
+        run_weekday, run_weekday_name = _weekday_from_pdate(self.context.pdate)
         run_record = PipelineRun(
             run_id=self.context.run_id,
             status=RunStatus.PENDING,
@@ -127,7 +146,9 @@ class PipelineExecutor:
             pdate=self.context.pdate,
             irr_target=self.context.irr_target,
             input_file_path=self.context.input_file_path,
-            output_dir=self.context.output_dir
+            output_dir=self.context.output_dir,
+            run_weekday=run_weekday,
+            run_weekday_name=run_weekday_name,
         )
         
         self.db.add(run_record)
@@ -135,7 +156,7 @@ class PipelineExecutor:
         self.db.refresh(run_record)
         self.run_record = run_record
         
-        logger.info(f"Created run record: {self.context.run_id}")
+        logger.info(f"Created run record: {self.context.run_id} (weekday={run_weekday_name})")
         return run_record
     
     def update_run_status(self, status: RunStatus, **kwargs):
@@ -152,52 +173,77 @@ class PipelineExecutor:
                     setattr(self.run_record, key, value)
             
             self.db.commit()
+
+    def _set_phase(self, phase: str) -> None:
+        """Record the current pipeline phase (for diagnosing stuck runs: data vs code)."""
+        if self.run_record and hasattr(self.run_record, "last_phase"):
+            self.run_record.last_phase = phase
+            self.db.commit()
     
     def save_exceptions(self, exceptions: List[Dict[str, Any]]):
-        """Save loan exceptions to database."""
+        """Save loan exceptions to database with canonical rejection_criteria."""
         for exc_data in exceptions:
+            exc_type = exc_data.get("exception_type", "")
+            exc_cat = exc_data.get("exception_category", "unknown")
+            rejection_criteria = get_rejection_criteria(exc_type, exc_cat) or exc_data.get("rejection_criteria")
             exception = LoanException(
                 run_id=self.run_record.id,
-                seller_loan_number=exc_data['seller_loan_number'],
-                exception_type=exc_data['exception_type'],
-                exception_category=exc_data.get('exception_category', 'unknown'),
-                severity=exc_data.get('severity', 'warning'),
-                message=exc_data.get('message', ''),
-                loan_data=exc_data.get('loan_data', {})
+                seller_loan_number=exc_data["seller_loan_number"],
+                exception_type=exc_type,
+                exception_category=exc_cat,
+                severity=exc_data.get("severity", "warning"),
+                message=exc_data.get("message", ""),
+                rejection_criteria=rejection_criteria,
+                loan_data=to_json_safe(exc_data.get("loan_data") or {}),
             )
             self.db.add(exception)
         
         self.db.commit()
         logger.info(f"Saved {len(exceptions)} exceptions")
     
-    def save_loan_facts(self, final_df: pd.DataFrame):
-        """Save loan facts to database."""
+    def save_loan_facts(
+        self,
+        final_df: pd.DataFrame,
+        rejected_loans: Optional[Dict[str, str]] = None,
+    ):
+        """Save loan facts with disposition (to_purchase / projected / rejected) and rejection_criteria."""
+        rejected_loans = rejected_loans or {}
         facts = []
         
         for _, row in final_df.iterrows():
+            seller = row.get("SELLER Loan #", "UNKNOWN")
+            if seller in rejected_loans:
+                disposition = DISPOSITION_REJECTED
+                rejection_criteria = rejected_loans[seller]
+            else:
+                disposition = DISPOSITION_TO_PURCHASE
+                rejection_criteria = None
+            
             fact = LoanFact(
                 run_id=self.run_record.id,
-                seller_loan_number=row.get('SELLER Loan #', 'UNKNOWN'),
-                platform=row.get('platform'),
-                loan_program=row.get('loan program'),
-                application_type=row.get('Application Type'),
-                orig_balance=row.get('Orig. Balance'),
-                purchase_price=row.get('Purchase Price'),
-                lender_price_pct=row.get('Lender Price(%)'),
-                fico_borrower=row.get('FICO Borrower'),
-                dti=row.get('DTI'),
-                pti=row.get('PTI'),
-                term=row.get('Term'),
-                apr=row.get('APR'),
-                property_state=row.get('Property State'),
-                purchase_price_check=row.get('purchase_price_check', False),
-                loan_data=row.to_dict()
+                seller_loan_number=seller,
+                platform=row.get("platform"),
+                loan_program=row.get("loan program"),
+                application_type=row.get("Application Type"),
+                orig_balance=row.get("Orig. Balance"),
+                purchase_price=row.get("Purchase Price"),
+                lender_price_pct=row.get("Lender Price(%)"),
+                fico_borrower=row.get("FICO Borrower"),
+                dti=row.get("DTI"),
+                pti=row.get("PTI"),
+                term=row.get("Term"),
+                apr=row.get("APR"),
+                property_state=row.get("Property State"),
+                purchase_price_check=row.get("purchase_price_check", False),
+                disposition=disposition,
+                rejection_criteria=rejection_criteria,
+                loan_data=to_json_safe(row.to_dict()),
             )
             facts.append(fact)
         
         self.db.bulk_save_objects(facts)
         self.db.commit()
-        logger.info(f"Saved {len(facts)} loan facts")
+        logger.info(f"Saved {len(facts)} loan facts (to_purchase vs rejected by criteria)")
     
     def execute(self, folder: str) -> Dict[str, Any]:
         """Execute the full pipeline."""
@@ -205,11 +251,14 @@ class PipelineExecutor:
             # Create run record
             self.create_run_record()
             self.update_run_status(RunStatus.RUNNING)
+            self._set_phase("load_reference_data")
             
             # Load data
             ref_data = self.load_reference_data(folder)
+            self._set_phase("load_input_files")
             input_files = self.load_input_files(folder)
             
+            self._set_phase("normalize_loans")
             # Process loans
             loans = normalize_loans_df(input_files['loans'])
             loans = tag_loans_by_group(loans)
@@ -277,6 +326,7 @@ class PipelineExecutor:
             buy_df = check_purchase_price(buy_df)
             final_df = check_purchase_price(final_df)
             
+            self._set_phase("underwriting")
             # Collect exceptions
             all_exceptions = []
             
@@ -297,9 +347,11 @@ class PipelineExecutor:
                 buy_df, ref_data['underwriting_sfy_notes'], is_notes=True, tuloans=list(tuloans)
             )
             
-            all_exceptions.extend(get_underwriting_exceptions(buy_df, flagged_loans, 'underwriting'))
+            all_exceptions.extend(get_underwriting_exceptions(buy_df, flagged_loans_sfy, 'underwriting_sfy'))
+            all_exceptions.extend(get_underwriting_exceptions(buy_df, flagged_loans_prime, 'underwriting_prime'))
             all_exceptions.extend(get_underwriting_exceptions(buy_df, flagged_notes, 'underwriting_notes'))
             
+            self._set_phase("comap")
             # CoMAP checks
             loan_not_in_comap = check_comap_prime(
                 buy_df, ref_data['prime_comap'], ref_data['prime_comap_oct25'],
@@ -312,10 +364,26 @@ class PipelineExecutor:
             ))
             loan_not_in_comap.extend(check_comap_notes(buy_df, ref_data['notes_comap']))
             
+            # CoMAP exceptions for DB and rejection_criteria mapping
+            for (seller_loan_number, _prog, platform) in loan_not_in_comap:
+                exc_type = "comap_prime" if platform == "PRIME" else ("comap_sfy" if platform == "SFY" else "comap_notes")
+                match = buy_df[buy_df["SELLER Loan #"] == seller_loan_number]
+                row = match.iloc[0].to_dict() if len(match) > 0 else {}
+                all_exceptions.append({
+                    "seller_loan_number": seller_loan_number,
+                    "exception_type": exc_type,
+                    "exception_category": "not_in_comap",
+                    "severity": "error",
+                    "message": f"Loan not in CoMAP grid ({platform})",
+                    "loan_data": row,
+                })
+            
+            self._set_phase("eligibility")
             # Eligibility checks (pass buy_df for SFY check_l5)
             eligibility_prime = check_eligibility_prime(final_df_all)
             eligibility_sfy = check_eligibility_sfy(final_df_all, buy_df=buy_df)
             
+            self._set_phase("export_reports")
             # Prepare exception reports
             purchase_mismatch = final_df[final_df['purchase_price_check'] == False]
             flagged_df = buy_df[buy_df['SELLER Loan #'].isin(flagged_loans)]
@@ -344,9 +412,23 @@ class PipelineExecutor:
             )
             reports['eligibility_report'] = eligibility_report_path
             
+            # Build rejected_loans map: first rejection_criteria per loan (for disposition)
+            rejected_loans = {}
+            for exc in all_exceptions:
+                sn = exc.get("seller_loan_number")
+                if not sn or sn in rejected_loans:
+                    continue
+                rc = get_rejection_criteria(
+                    exc.get("exception_type", ""),
+                    exc.get("exception_category", ""),
+                )
+                if rc:
+                    rejected_loans[sn] = rc
+            
+            self._set_phase("save_db")
             # Save to database
             self.save_exceptions(all_exceptions)
-            self.save_loan_facts(final_df)
+            self.save_loan_facts(final_df, rejected_loans=rejected_loans)
             
             # Update run summary
             self.update_run_status(

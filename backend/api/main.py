@@ -1,11 +1,13 @@
 """FastAPI application main entry point."""
+from pathlib import Path
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from contextlib import asynccontextmanager
 import logging
 import logging.config
 import yaml
-from pathlib import Path
 
 from config.settings import settings
 from api.routes import router as api_router
@@ -78,10 +80,21 @@ app.add_middleware(
 app.include_router(auth_router)
 app.include_router(api_router)
 
+# Serve frontend static files when present (e.g. in Docker / production build)
+_static_dir = Path(__file__).resolve().parent.parent / "static"
+if _static_dir.is_dir():
+    _assets = _static_dir / "assets"
+    if _assets.is_dir():
+        app.mount("/assets", StaticFiles(directory=str(_assets)), name="assets")
+
 
 @app.get("/")
 async def root():
-    """Root endpoint."""
+    """Root endpoint; serves SPA index when static build present."""
+    index_html = Path(__file__).resolve().parent.parent / "static" / "index.html"
+    if index_html.exists():
+        from fastapi.responses import FileResponse
+        return FileResponse(str(index_html))
     return {
         "message": "Loan Engine API",
         "version": "1.0.0",
@@ -91,8 +104,38 @@ async def root():
 
 @app.get("/health")
 async def health_check():
-    """Health check endpoint."""
+    """Health check endpoint (API only)."""
     return {"status": "healthy"}
+
+
+@app.get("/health/ready")
+async def health_ready():
+    """Readiness check: API + database connectivity. Use for demo verification."""
+    from sqlalchemy import text
+    from db.connection import SessionLocal
+    try:
+        db = SessionLocal()
+        db.execute(text("SELECT 1"))
+        db.close()
+        return {"status": "ready", "database": "connected"}
+    except Exception as e:
+        logger.exception("Database health check failed")
+        return {"status": "degraded", "database": "disconnected", "error": str(e)}
+
+
+# SPA fallback: serve index.html for non-API routes when static build is present
+if _static_dir.is_dir():
+    _index_html = _static_dir / "index.html"
+    if _index_html.exists():
+        from fastapi.responses import FileResponse
+        from fastapi import Request
+
+        @app.get("/{full_path:path}")
+        async def spa_fallback(request: Request, full_path: str):
+            if full_path.startswith(("api/", "auth/", "docs", "openapi.json", "health", "assets/")):
+                from fastapi import HTTPException
+                raise HTTPException(status_code=404, detail="Not found")
+            return FileResponse(str(_index_html))
 
 
 if __name__ == "__main__":

@@ -1,8 +1,12 @@
 """API routes for loan engine."""
+import io
+from datetime import datetime
+
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import Response
 from sqlalchemy.orm import Session
 from typing import List, Optional
-from datetime import datetime
+import pandas as pd
 from pydantic import BaseModel
 
 from db.connection import get_db
@@ -33,6 +37,10 @@ class RunResponse(BaseModel):
     total_loans: int
     total_balance: float
     exceptions_count: int
+    run_weekday: Optional[int] = None
+    run_weekday_name: Optional[str] = None
+    pdate: Optional[str] = None
+    last_phase: Optional[str] = None
     started_at: Optional[datetime]
     completed_at: Optional[datetime]
     created_at: datetime
@@ -49,6 +57,23 @@ class ExceptionResponse(BaseModel):
     exception_category: str
     severity: str
     message: Optional[str]
+    rejection_criteria: Optional[str] = None
+    created_at: datetime
+    
+    class Config:
+        from_attributes = True
+
+
+class LoanFactResponse(BaseModel):
+    """Loan fact response (for to_purchase / projected / rejected)."""
+    id: int
+    run_id: int
+    seller_loan_number: str
+    platform: Optional[str]
+    loan_program: Optional[str]
+    disposition: Optional[str] = None
+    rejection_criteria: Optional[str] = None
+    purchase_price_check: Optional[bool] = None
     created_at: datetime
     
     class Config:
@@ -118,10 +143,11 @@ async def list_runs(
     skip: int = Query(0, ge=0),
     limit: int = Query(100, ge=1, le=1000),
     status: Optional[str] = None,
+    run_weekday: Optional[int] = Query(None, ge=0, le=6, description="Filter by day of week (0=Monday .. 6=Sunday)"),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    """List pipeline runs with pagination."""
+    """List pipeline runs with pagination. Filter by run_weekday for day-of-week segregation."""
     query = db.query(PipelineRun)
     
     # Apply sales team filter
@@ -137,6 +163,10 @@ async def list_runs(
             query = query.filter(PipelineRun.status == status_enum)
         except ValueError:
             raise HTTPException(status_code=400, detail=f"Invalid status: {status}")
+    
+    # Filter by day of week (activity segregation)
+    if run_weekday is not None:
+        query = query.filter(PipelineRun.run_weekday == run_weekday)
     
     # Order by created_at descending
     query = query.order_by(PipelineRun.created_at.desc())
@@ -195,46 +225,112 @@ async def get_run_summary(
     }
 
 
+def _exceptions_query(
+    db: Session,
+    current_user: User,
+    run_id: Optional[str] = None,
+    exception_type: Optional[str] = None,
+    severity: Optional[str] = None,
+    rejection_criteria: Optional[str] = None,
+):
+    """Base filtered query for exceptions (list and export)."""
+    query = db.query(LoanException).join(PipelineRun)
+    query = filter_by_sales_team(query, current_user)
+    if run_id:
+        query = query.filter(PipelineRun.run_id == run_id)
+    if exception_type:
+        query = query.filter(LoanException.exception_type == exception_type)
+    if severity:
+        query = query.filter(LoanException.severity == severity)
+    if rejection_criteria:
+        query = query.filter(LoanException.rejection_criteria == rejection_criteria)
+    return query.order_by(LoanException.created_at.desc())
+
+
 @router.get("/exceptions", response_model=List[ExceptionResponse])
 async def get_exceptions(
     run_id: Optional[str] = None,
     exception_type: Optional[str] = None,
     severity: Optional[str] = None,
+    rejection_criteria: Optional[str] = Query(None, description="Filter by notebook rejection key (e.g. notebook.purchase_price_mismatch)"),
     skip: int = Query(0, ge=0),
     limit: int = Query(100, ge=1, le=1000),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    """Get loan exceptions with filtering."""
-    query = db.query(LoanException).join(PipelineRun)
-    
-    # Apply sales team filter
-    query = filter_by_sales_team(query, current_user)
-    
-    if run_id:
-        query = query.filter(PipelineRun.run_id == run_id)
-    
-    if exception_type:
-        query = query.filter(LoanException.exception_type == exception_type)
-    
-    if severity:
-        query = query.filter(LoanException.severity == severity)
-    
-    query = query.order_by(LoanException.created_at.desc())
+    """Get loan exceptions with filtering (including rejection_criteria for notebook mapping)."""
+    query = _exceptions_query(db, current_user, run_id, exception_type, severity, rejection_criteria)
     exceptions = query.offset(skip).limit(limit).all()
-    
     return exceptions
+
+
+@router.get("/exceptions/export")
+async def export_exceptions(
+    format: str = Query("csv", description="Export format: csv or xlsx"),
+    run_id: Optional[str] = None,
+    exception_type: Optional[str] = None,
+    severity: Optional[str] = None,
+    rejection_criteria: Optional[str] = None,
+    limit: int = Query(10000, ge=1, le=50000),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Export loan exceptions to CSV or Excel. Uses same filters as GET /api/exceptions."""
+    log_data_access(current_user, "exceptions_export", details={"format": format})
+    query = _exceptions_query(db, current_user, run_id, exception_type, severity, rejection_criteria)
+    rows = query.limit(limit).all()
+    if not rows:
+        raise HTTPException(status_code=404, detail="No exceptions match the filters.")
+    # Build export rows (no loan_data to keep file simple)
+    data = [
+        {
+            "seller_loan_number": e.seller_loan_number,
+            "exception_type": e.exception_type,
+            "exception_category": e.exception_category or "",
+            "severity": e.severity or "",
+            "message": e.message or "",
+            "rejection_criteria": e.rejection_criteria or "",
+            "created_at": e.created_at.isoformat() if e.created_at else "",
+        }
+        for e in rows
+    ]
+    df = pd.DataFrame(data)
+    if format.lower() == "csv":
+        buf = io.StringIO()
+        df.to_csv(buf, index=False)
+        csv_bytes = buf.getvalue().encode("utf-8")
+        filename = f"loan_exceptions_{datetime.utcnow().strftime('%Y-%m-%d_%H%M')}.csv"
+        return Response(
+            content=csv_bytes,
+            media_type="text/csv; charset=utf-8",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+    if format.lower() in ("xlsx", "excel"):
+        buf = io.BytesIO()
+        df.to_excel(buf, index=False, engine="openpyxl")
+        buf.seek(0)
+        filename = f"loan_exceptions_{datetime.utcnow().strftime('%Y-%m-%d_%H%M')}.xlsx"
+        return Response(
+            content=buf.getvalue(),
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+    raise HTTPException(status_code=400, detail="format must be csv or xlsx")
 
 
 @router.get("/loans", response_model=List[dict])
 async def get_loans(
     run_id: str,
+    disposition: Optional[str] = Query(
+        None,
+        description="Filter by disposition: to_purchase (eligible), projected, rejected",
+    ),
     skip: int = Query(0, ge=0),
     limit: int = Query(100, ge=1, le=1000),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    """Get loan facts for a run."""
+    """Get loan facts for a run. Filter by disposition for to_purchase vs projected vs rejected."""
     # Verify run access
     run_query = db.query(PipelineRun).filter(PipelineRun.run_id == run_id)
     run_query = filter_by_sales_team(run_query, current_user)
@@ -246,11 +342,25 @@ async def get_loans(
     # Get loan facts with sales team filtering
     query = db.query(LoanFact).join(PipelineRun).filter(LoanFact.run_id == run.id)
     query = filter_by_sales_team(query, current_user)
+    
+    if disposition:
+        query = query.filter(LoanFact.disposition == disposition)
+    
     query = query.order_by(LoanFact.created_at.desc())
     facts = query.offset(skip).limit(limit).all()
     
-    # Convert to dicts
-    return [fact.loan_data for fact in facts]
+    # Return dicts with loan_data plus disposition and rejection_criteria
+    out = []
+    for fact in facts:
+        item = {
+            "seller_loan_number": fact.seller_loan_number,
+            "disposition": getattr(fact, "disposition", None),
+            "rejection_criteria": getattr(fact, "rejection_criteria", None),
+        }
+        if fact.loan_data:
+            item["loan_data"] = fact.loan_data
+        out.append(item)
+    return out
 
 
 @router.get("/sales-teams", response_model=List[dict])

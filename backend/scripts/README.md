@@ -53,9 +53,26 @@ psql -d loan_engine
 
 2. **Create initial admin user** (see below)
 
+## Check if Admin User Exists
+
+**First, check if admin already exists:**
+
+```bash
+# From the backend directory
+python scripts/check_admin.py
+```
+
+This will show:
+- ✅ If admin exists: username, email, role, and ID
+- ❌ If admin doesn't exist: instructions to create it
+
 ## Create Initial Admin User
 
-To create the first admin user in your database, run:
+**If admin doesn't exist, create it:**
+
+```bash
+# From the backend directory
+python scripts/seed_admin.py
 
 ```bash
 # From the backend directory
@@ -183,7 +200,11 @@ For detailed database setup instructions, see:
 | Script | Purpose |
 |--------|---------|
 | `init_db.py` | Initialize/create all database tables |
+| `check_admin.py` | Check if admin user exists |
 | `seed_admin.py` | Create initial admin user |
+| `reset_admin_password.py` | Reset admin user password |
+| **`reset_demo_data.py`** | **Delete all rows before demo (keeps tables); optional `--all` to clear users too** |
+| **`fix_stuck_runs.py`** | **List runs stuck in 'running' and mark them failed/cancelled** |
 | `create_tables.sql` | SQL reference for manual table creation |
 | `check_input_files.py` | Check if required input files exist |
 
@@ -196,15 +217,57 @@ python scripts/init_db.py
 # 2. Apply constraint (PostgreSQL only)
 psql -d loan_engine -f backend/db/migrations/add_sales_team_constraint.sql
 
-# 3. Create admin user
+# 3. Check if admin exists
+python scripts/check_admin.py
+
+# 4. Create admin user (if missing)
 python scripts/seed_admin.py
 
-# 4. Check input files (before running pipeline)
+# 5. Check input files (before running pipeline)
 python scripts/check_input_files.py --folder "C:/path/to/your/input/folder"
 
-# 5. Start application
+# 6. Start application
 uvicorn api.main:app --reload
 ```
+
+## Reset Data Before Demo
+
+To re-initialize the database (delete all rows, keep tables) before a demo:
+
+```bash
+# From the backend directory
+
+# Clear pipeline data only (runs, exceptions, loan_facts). Users/sales_teams kept — login still works.
+python scripts/reset_demo_data.py
+
+# Clear everything including users and sales_teams. Run seed_admin.py afterward.
+python scripts/reset_demo_data.py --all
+
+# Skip confirmation prompt
+python scripts/reset_demo_data.py --yes
+```
+
+After `--all`, run `python scripts/seed_admin.py` to recreate the admin user.
+
+## Fix Stuck Pipeline Runs
+
+If a run stays in **running** state (e.g. backend was restarted during a run):
+
+```bash
+# List runs stuck in 'running'
+python scripts/fix_stuck_runs.py --list
+
+# Mark one run as failed (use run_id from API or UI)
+python scripts/fix_stuck_runs.py --run-id <RUN_ID> --mark failed
+
+# Mark as cancelled
+python scripts/fix_stuck_runs.py --run-id <RUN_ID> --mark cancelled
+
+# Mark all runs running longer than 60 minutes as failed
+python scripts/fix_stuck_runs.py --mark failed --older-than-minutes 60 --yes
+```
+
+See **[docs/TROUBLESHOOTING_STUCK_RUNS.md](../docs/TROUBLESHOOTING_STUCK_RUNS.md)** for full troubleshooting steps.
 
 ## Check Input Files
 

@@ -187,6 +187,26 @@ PermissionError: [WinError 5] Access is denied
 - Check file/folder permissions
 - Ensure antivirus isn't blocking file access
 
+## Verifying frontend–backend connectivity
+
+To confirm the frontend is talking to the backend:
+
+1. **Login page indicator**  
+   Open the app and go to the login screen. Under “Sign in to your account” you should see either “Backend connected” or “Backend unreachable”. The former means the browser successfully called `GET /health` on the API.
+
+2. **Browser DevTools → Network**  
+   Open DevTools (F12) → Network. Submit login or load a page that calls the API. Check that requests go to the expected host (e.g. same origin like `https://your-alb-url/api/...` or `http://localhost:8000/api/...`) and return 200 (or 401 for unauthenticated), not failed/CORS/blocked.
+
+3. **Call the health endpoint from the same origin**  
+   In the browser console or a new tab (same URL as the app), run:
+   ```javascript
+   fetch('/health').then(r => r.json()).then(console.log)
+   ```
+   You should see `{ status: "healthy" }`. If the request fails or goes to the wrong host, the frontend’s API base URL (e.g. `VITE_API_URL`) or same-origin setup is wrong.
+
+4. **Production (ALB)**  
+   The frontend is built with `VITE_API_URL=` so API calls use the same origin. Ensure the browser is loading the app from the same base URL as the backend (e.g. `https://your-alb.amazonaws.com/`). If the app is on a different domain, set `VITE_API_URL` at build time to the backend base URL (e.g. `https://api.yourdomain.com`).
+
 ## Verification Steps
 
 After fixing issues, verify the application:

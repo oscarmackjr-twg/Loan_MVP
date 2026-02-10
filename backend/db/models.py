@@ -77,16 +77,23 @@ class PipelineRun(Base):
     created_by_id = Column(Integer, ForeignKey("users.id"), nullable=True)
     
     # Run parameters
-    pdate = Column(String(20))  # Purchase date
+    pdate = Column(String(20))  # Purchase date (YYYY-MM-DD)
     irr_target = Column(Float, default=8.05)
     input_file_path = Column(String(500))
     output_dir = Column(String(500))
+    
+    # Day-of-week segregation (0=Monday .. 6=Sunday; derived from pdate)
+    run_weekday = Column(Integer, nullable=True)  # 0-6
+    run_weekday_name = Column(String(20), nullable=True)  # Monday, Tuesday, ...
     
     # Results summary
     total_loans = Column(Integer, default=0)
     total_balance = Column(Float, default=0.0)
     exceptions_count = Column(Integer, default=0)
     errors = Column(JSON, default=list)
+    
+    # Last pipeline phase reached (for stuck runs: shows where execution stopped)
+    last_phase = Column(String(80), nullable=True)
     
     # Timestamps
     started_at = Column(DateTime)
@@ -111,6 +118,8 @@ class LoanException(Base):
     exception_category = Column(String(100))  # flagged, mismatch, etc.
     severity = Column(String(20), default="warning")  # error, warning, info
     message = Column(Text)
+    # Canonical rejection criteria key mapping to notebook (see NOTEBOOK_REJECTION_MAPPING.md)
+    rejection_criteria = Column(String(120), nullable=True)
     loan_data = Column(JSON)  # Snapshot of loan data
     
     created_at = Column(DateTime, default=datetime.utcnow)
@@ -145,6 +154,11 @@ class LoanFact(Base):
     underwriting_pass = Column(Boolean, default=False)
     comap_pass = Column(Boolean, default=False)
     eligibility_pass = Column(Boolean, default=False)
+    
+    # Disposition: to_purchase (passed all checks), projected (included in run), rejected (failed one+ checks)
+    disposition = Column(String(30), default="projected")  # to_purchase | projected | rejected
+    # Canonical rejection reason mapping to notebook (set when disposition=rejected)
+    rejection_criteria = Column(String(120), nullable=True)
     
     # Additional data
     loan_data = Column(JSON)
