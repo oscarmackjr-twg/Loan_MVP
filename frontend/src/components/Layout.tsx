@@ -10,6 +10,7 @@ export default function Layout() {
     { path: '/runs', label: 'Pipeline Runs' },
     { path: '/exceptions', label: 'Exceptions' },
     { path: '/rejected-loans', label: 'Rejected Loans' },
+    { path: '/files', label: 'File Manager' },
   ]
 
   return (

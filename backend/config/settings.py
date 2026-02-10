@@ -17,9 +17,17 @@ class Settings(BaseSettings):
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
     
     # File Storage
+    STORAGE_TYPE: str = "local"  # "local" or "s3"
     INPUT_DIR: str = "./data/inputs"
     OUTPUT_DIR: str = "./data/outputs"
     OUTPUT_SHARE_DIR: str = "./data/output_share"
+    
+    # S3 Configuration (required when STORAGE_TYPE=s3)
+    S3_BUCKET_NAME: Optional[str] = None
+    S3_REGION: Optional[str] = None
+    S3_ACCESS_KEY_ID: Optional[str] = None
+    S3_SECRET_ACCESS_KEY: Optional[str] = None
+    S3_BASE_PREFIX: Optional[str] = None  # Optional prefix for all S3 paths (e.g., "test/" or "prod/")
     
     # Pipeline
     IRR_TARGET: float = 8.05

@@ -6,6 +6,7 @@ import Runs from './pages/Runs'
 import RunDetail from './pages/RunDetail'
 import Exceptions from './pages/Exceptions'
 import RejectedLoans from './pages/RejectedLoans'
+import FileManager from './pages/FileManager'
 import ProtectedRoute from './components/ProtectedRoute'
 import Layout from './components/Layout'
 
@@ -28,6 +29,7 @@ function App() {
           <Route path="runs/:runId" element={<RunDetail />} />
           <Route path="exceptions" element={<Exceptions />} />
           <Route path="rejected-loans" element={<RejectedLoans />} />
+          <Route path="files" element={<FileManager />} />
         </Route>
       </Routes>
     </AuthProvider>
