@@ -1,7 +1,10 @@
 """Excel export functionality."""
+import io
 import pandas as pd
 from pathlib import Path
 from typing import Optional
+
+from storage.base import StorageBackend
 
 
 def export_to_excel(
@@ -20,57 +23,87 @@ def export_to_excel(
     export_df.to_excel(file_path, sheet_name=sheet_name, index=False)
 
 
+def export_to_excel_bytes(
+    df: pd.DataFrame,
+    sheet_name: str = "Sheet1",
+    max_cols: Optional[int] = None,
+) -> bytes:
+    """Export dataframe to an Excel workbook (bytes)."""
+    export_df = df.copy()
+    if max_cols:
+        export_df = export_df.iloc[:, :max_cols]
+
+    buffer = io.BytesIO()
+    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+        export_df.to_excel(writer, sheet_name=sheet_name, index=False)
+    buffer.seek(0)
+    return buffer.read()
+
+
 def export_exception_reports(
     purchase_mismatch: pd.DataFrame,
     flagged_loans: pd.DataFrame,
     notes_flagged: pd.DataFrame,
     comap_failed: pd.DataFrame,
-    output_dir: str,
-    output_share_dir: str
+    output_prefix: str,
+    output_share_prefix: str,
+    *,
+    storage: StorageBackend,
+    share_storage: StorageBackend,
 ) -> dict:
-    """Export all exception reports to Excel."""
+    """
+    Export notebook-replacement exception reports.
+
+    Writes the 4 key outputs:
+    - flagged_loans.xlsx
+    - purchase_price_mismatch.xlsx
+    - comap_not_passed.xlsx
+    - notes_flagged_loans.xlsx
+
+    to both the internal outputs area and (optionally) a share outputs area.
+    """
     reports = {}
     
     # Internal reports (full data)
     if not purchase_mismatch.empty:
-        purchase_path = f"{output_dir}/purchase_price_mismatch.xlsx"
-        export_to_excel(purchase_mismatch, purchase_path)
-        reports['purchase_price_mismatch'] = purchase_path
+        purchase_path = f"{output_prefix}/purchase_price_mismatch.xlsx"
+        storage.write_file(purchase_path, export_to_excel_bytes(purchase_mismatch))
+        reports["purchase_price_mismatch"] = purchase_path
     
     if not flagged_loans.empty:
-        flagged_path = f"{output_dir}/flagged_loans_first.xlsx"
-        export_to_excel(flagged_loans, flagged_path)
-        reports['flagged_loans'] = flagged_path
+        flagged_path = f"{output_prefix}/flagged_loans.xlsx"
+        storage.write_file(flagged_path, export_to_excel_bytes(flagged_loans))
+        reports["flagged_loans"] = flagged_path
     
     if not notes_flagged.empty:
-        notes_path = f"{output_dir}/NOTES_flagged_loans_first.xlsx"
-        export_to_excel(notes_flagged, notes_path)
-        reports['notes_flagged'] = notes_path
+        notes_path = f"{output_prefix}/notes_flagged_loans.xlsx"
+        storage.write_file(notes_path, export_to_excel_bytes(notes_flagged))
+        reports["notes_flagged_loans"] = notes_path
     
     if not comap_failed.empty:
-        comap_path = f"{output_dir}/comap_not_passed.xlsx"
-        export_to_excel(comap_failed, comap_path)
-        reports['comap_failed'] = comap_path
+        comap_path = f"{output_prefix}/comap_not_passed.xlsx"
+        storage.write_file(comap_path, export_to_excel_bytes(comap_failed))
+        reports["comap_not_passed"] = comap_path
     
     # Shared reports (limited columns)
     if not purchase_mismatch.empty:
-        purchase_share_path = f"{output_share_dir}/purchase_price_mismatch.xlsx"
-        export_to_excel(purchase_mismatch.iloc[:, :30], purchase_share_path)
-        reports['purchase_price_mismatch_share'] = purchase_share_path
+        purchase_share_path = f"{output_share_prefix}/purchase_price_mismatch.xlsx"
+        share_storage.write_file(purchase_share_path, export_to_excel_bytes(purchase_mismatch, max_cols=30))
+        reports["purchase_price_mismatch_share"] = purchase_share_path
     
     if not flagged_loans.empty:
-        flagged_share_path = f"{output_share_dir}/flagged_loans_first.xlsx"
-        export_to_excel(flagged_loans.iloc[:, :30], flagged_share_path)
-        reports['flagged_loans_share'] = flagged_share_path
+        flagged_share_path = f"{output_share_prefix}/flagged_loans.xlsx"
+        share_storage.write_file(flagged_share_path, export_to_excel_bytes(flagged_loans, max_cols=30))
+        reports["flagged_loans_share"] = flagged_share_path
     
     if not notes_flagged.empty:
-        notes_share_path = f"{output_share_dir}/NOTES_flagged_loans_first.xlsx"
-        export_to_excel(notes_flagged.iloc[:, :30], notes_share_path)
-        reports['notes_flagged_share'] = notes_share_path
+        notes_share_path = f"{output_share_prefix}/notes_flagged_loans.xlsx"
+        share_storage.write_file(notes_share_path, export_to_excel_bytes(notes_flagged, max_cols=30))
+        reports["notes_flagged_loans_share"] = notes_share_path
     
     if not comap_failed.empty:
-        comap_share_path = f"{output_share_dir}/comap_not_passed.xlsx"
-        export_to_excel(comap_failed.iloc[:, :30], comap_share_path)
-        reports['comap_failed_share'] = comap_share_path
+        comap_share_path = f"{output_share_prefix}/comap_not_passed.xlsx"
+        share_storage.write_file(comap_share_path, export_to_excel_bytes(comap_failed, max_cols=30))
+        reports["comap_not_passed_share"] = comap_share_path
     
     return reports

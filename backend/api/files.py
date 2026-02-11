@@ -1,10 +1,9 @@
 """File management API endpoints."""
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Query
-from fastapi.responses import StreamingResponse, JSONResponse
-from typing import List, Optional
-from storage import get_storage_backend, StorageType
-from storage.base import FileInfo
-from auth.routes import get_current_user
+from fastapi.responses import StreamingResponse
+from typing import Optional
+from storage import get_storage_backend
+from auth.security import get_current_user
 from db.models import User
 import io
 import logging
@@ -18,12 +17,13 @@ router = APIRouter(prefix="/api/files", tags=["files"])
 async def list_files(
     path: str = Query("", description="Directory path to list"),
     recursive: bool = Query(False, description="List files recursively"),
+    area: str = Query("inputs", description="Storage area: inputs | outputs | output_share"),
     storage_type: Optional[str] = Query(None, description="Override storage type (local/s3)"),
     current_user: User = Depends(get_current_user)
 ):
     """List files in a directory."""
     try:
-        storage = get_storage_backend(storage_type=storage_type)
+        storage = get_storage_backend(storage_type=storage_type, area=area)
         files = storage.list_files(path or "", recursive=recursive)
         
         return {
@@ -47,12 +47,13 @@ async def list_files(
 async def upload_file(
     file: UploadFile = File(...),
     path: str = Query("", description="Destination path (directory or full file path)"),
+    area: str = Query("inputs", description="Storage area: inputs | outputs | output_share"),
     storage_type: Optional[str] = Query(None, description="Override storage type (local/s3)"),
     current_user: User = Depends(get_current_user)
 ):
     """Upload a file."""
     try:
-        storage = get_storage_backend(storage_type=storage_type)
+        storage = get_storage_backend(storage_type=storage_type, area=area)
         
         # Determine destination path
         if path and not path.endswith("/"):
@@ -81,12 +82,13 @@ async def upload_file(
 @router.get("/download/{file_path:path}")
 async def download_file(
     file_path: str,
+    area: str = Query("inputs", description="Storage area: inputs | outputs | output_share"),
     storage_type: Optional[str] = Query(None, description="Override storage type (local/s3)"),
     current_user: User = Depends(get_current_user)
 ):
     """Download a file."""
     try:
-        storage = get_storage_backend(storage_type=storage_type)
+        storage = get_storage_backend(storage_type=storage_type, area=area)
         
         if not storage.file_exists(file_path):
             raise HTTPException(status_code=404, detail="File not found")
@@ -124,12 +126,13 @@ async def download_file(
 async def get_file_url(
     file_path: str,
     expires_in: int = Query(3600, description="URL expiration time in seconds"),
+    area: str = Query("inputs", description="Storage area: inputs | outputs | output_share"),
     storage_type: Optional[str] = Query(None, description="Override storage type (local/s3)"),
     current_user: User = Depends(get_current_user)
 ):
     """Get a presigned URL for file access (S3) or file path (local)."""
     try:
-        storage = get_storage_backend(storage_type=storage_type)
+        storage = get_storage_backend(storage_type=storage_type, area=area)
         
         if not storage.file_exists(file_path):
             raise HTTPException(status_code=404, detail="File not found")
@@ -147,12 +150,13 @@ async def get_file_url(
 @router.delete("/{file_path:path}")
 async def delete_file(
     file_path: str,
+    area: str = Query("inputs", description="Storage area: inputs | outputs | output_share"),
     storage_type: Optional[str] = Query(None, description="Override storage type (local/s3)"),
     current_user: User = Depends(get_current_user)
 ):
     """Delete a file."""
     try:
-        storage = get_storage_backend(storage_type=storage_type)
+        storage = get_storage_backend(storage_type=storage_type, area=area)
         
         if not storage.file_exists(file_path):
             raise HTTPException(status_code=404, detail="File not found")
@@ -170,12 +174,13 @@ async def delete_file(
 @router.post("/mkdir")
 async def create_directory(
     path: str = Query(..., description="Directory path to create"),
+    area: str = Query("inputs", description="Storage area: inputs | outputs | output_share"),
     storage_type: Optional[str] = Query(None, description="Override storage type (local/s3)"),
     current_user: User = Depends(get_current_user)
 ):
     """Create a directory."""
     try:
-        storage = get_storage_backend(storage_type=storage_type)
+        storage = get_storage_backend(storage_type=storage_type, area=area)
         storage.create_directory(path)
         
         return {"message": "Directory created successfully", "path": path}
