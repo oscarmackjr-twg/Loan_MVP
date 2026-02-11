@@ -9,6 +9,7 @@ interface FileInfo {
 }
 
 export default function FileManager() {
+  const area = 'outputs'
   const [currentPath, setCurrentPath] = useState('')
   const [files, setFiles] = useState<FileInfo[]>([])
   const [loading, setLoading] = useState(false)
@@ -23,7 +24,7 @@ export default function FileManager() {
     setLoading(true)
     try {
       const response = await axios.get('/api/files/list', {
-        params: { path: currentPath }
+        params: { path: currentPath, area }
       })
       setFiles(response.data.files || [])
     } catch (error: any) {
@@ -59,7 +60,7 @@ export default function FileManager() {
         formData.append('file', file)
         
         await axios.post('/api/files/upload', formData, {
-          params: { path: currentPath },
+          params: { path: currentPath, area },
           headers: { 'Content-Type': 'multipart/form-data' }
         })
       }
@@ -84,7 +85,7 @@ export default function FileManager() {
         formData.append('file', file)
         
         await axios.post('/api/files/upload', formData, {
-          params: { path: currentPath },
+          params: { path: currentPath, area },
           headers: { 'Content-Type': 'multipart/form-data' }
         })
       }
@@ -102,6 +103,7 @@ export default function FileManager() {
   const handleDownload = async (filePath: string) => {
     try {
       const response = await axios.get(`/api/files/download/${filePath}`, {
+        params: { area },
         responseType: 'blob'
       })
       
@@ -123,7 +125,7 @@ export default function FileManager() {
     if (!confirm(`Delete ${filePath}?`)) return
 
     try {
-      await axios.delete(`/api/files/${filePath}`)
+      await axios.delete(`/api/files/${filePath}`, { params: { area } })
       alert('File deleted successfully')
       loadFiles()
     } catch (error: any) {
