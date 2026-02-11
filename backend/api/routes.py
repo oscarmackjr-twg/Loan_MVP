@@ -3,7 +3,7 @@ import io
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from fastapi.responses import Response
+from fastapi.responses import Response, StreamingResponse
 from sqlalchemy.orm import Session
 from typing import List, Optional
 import pandas as pd
@@ -17,8 +17,16 @@ from auth.audit import log_data_access, log_authorization_failure
 from orchestration.run_context import RunContext
 from orchestration.pipeline import PipelineExecutor
 from config.settings import settings
+from storage import get_storage_backend
 
 router = APIRouter(prefix="/api", tags=["api"])
+
+NOTEBOOK_OUTPUT_DEFS = [
+    {"key": "flagged_loans", "filename": "flagged_loans.xlsx", "label": "Flagged loans"},
+    {"key": "purchase_price_mismatch", "filename": "purchase_price_mismatch.xlsx", "label": "Purchase price mismatch"},
+    {"key": "comap_not_passed", "filename": "comap_not_passed.xlsx", "label": "CoMAP not passed"},
+    {"key": "notes_flagged_loans", "filename": "notes_flagged_loans.xlsx", "label": "Notes flagged loans"},
+]
 
 
 class RunCreate(BaseModel):
@@ -117,13 +125,16 @@ async def create_pipeline_run(
         irr_target=run_data.irr_target
     )
     
-    # Add sales team ID to file paths for isolation
+    # Add sales team ID to file paths for isolation.
+    # Inputs are currently sourced from the provided folder (dev use-case).
+    # Outputs are stored under a stable per-run prefix so they can be served from local disk (dev)
+    # or S3 (test/prod) and downloaded from the UI.
     if sales_team_id:
         context.input_file_path = f"{run_data.folder}/sales_team_{sales_team_id}"
-        context.output_dir = f"{run_data.folder}/sales_team_{sales_team_id}/output"
+        context.output_dir = f"sales_team_{sales_team_id}/runs/{context.run_id}"
     else:
         context.input_file_path = run_data.folder
-        context.output_dir = f"{run_data.folder}/output"
+        context.output_dir = f"runs/{context.run_id}"
     
     # Execute pipeline
     try:
@@ -195,6 +206,79 @@ async def get_run(
     log_data_access(current_user, 'pipeline_run', run_id, sales_team_id=run.sales_team_id)
     
     return run
+
+
+@router.get("/runs/{run_id}/notebook-outputs")
+async def list_notebook_outputs(
+    run_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    List the 4 notebook-replacement output files for a run.
+
+    Files are stored under the per-run prefix `PipelineRun.output_dir` in the **outputs** storage area
+    (local disk in development, S3 in test/production).
+    """
+    query = db.query(PipelineRun).filter(PipelineRun.run_id == run_id)
+    query = filter_by_sales_team(query, current_user)
+    run = query.first()
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+
+    prefix = (run.output_dir or f"runs/{run_id}").strip("/")
+    # Back-compat: older runs stored absolute local paths in output_dir. Those aren't usable
+    # with the storage abstraction (which expects a relative key within the outputs area).
+    if ":" in prefix or prefix.startswith(("/", "\\")):
+        prefix = f"runs/{run_id}"
+    storage = get_storage_backend(area="outputs")
+
+    outputs = []
+    for d in NOTEBOOK_OUTPUT_DEFS:
+        path = f"{prefix}/{d['filename']}"
+        outputs.append(
+            {
+                "key": d["key"],
+                "label": d["label"],
+                "path": path,
+                "exists": storage.file_exists(path),
+            }
+        )
+    return {"run_id": run_id, "prefix": prefix, "outputs": outputs}
+
+
+@router.get("/runs/{run_id}/notebook-outputs/{output_key}/download")
+async def download_notebook_output(
+    run_id: str,
+    output_key: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Download one of the 4 notebook-replacement output files for a run."""
+    query = db.query(PipelineRun).filter(PipelineRun.run_id == run_id)
+    query = filter_by_sales_team(query, current_user)
+    run = query.first()
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+
+    match = next((d for d in NOTEBOOK_OUTPUT_DEFS if d["key"] == output_key), None)
+    if not match:
+        raise HTTPException(status_code=404, detail="Unknown output key")
+
+    prefix = (run.output_dir or f"runs/{run_id}").strip("/")
+    if ":" in prefix or prefix.startswith(("/", "\\")):
+        prefix = f"runs/{run_id}"
+    path = f"{prefix}/{match['filename']}"
+    storage = get_storage_backend(area="outputs")
+    if not storage.file_exists(path):
+        raise HTTPException(status_code=404, detail="File not found")
+
+    content = storage.read_file(path)
+    return StreamingResponse(
+        io.BytesIO(content),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{match["filename"]}"'},
+    )
 
 
 @router.get("/summary/{run_id}", response_model=SummaryResponse)

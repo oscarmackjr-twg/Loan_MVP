@@ -30,18 +30,28 @@ interface RejectedLoan {
   loan_data?: Record<string, unknown>
 }
 
+interface NotebookOutput {
+  key: string
+  label: string
+  path: string
+  exists: boolean
+}
+
 export default function RunDetail() {
   const { runId } = useParams<{ runId: string }>()
   const [run, setRun] = useState<RunDetail | null>(null)
   const [summary, setSummary] = useState<Summary | null>(null)
   const [rejectedLoans, setRejectedLoans] = useState<RejectedLoan[]>([])
+  const [notebookOutputs, setNotebookOutputs] = useState<NotebookOutput[]>([])
   const [loading, setLoading] = useState(true)
+  const [loadingOutputs, setLoadingOutputs] = useState(false)
 
   useEffect(() => {
     if (runId) {
       fetchRunDetail()
       fetchSummary()
       fetchRejectedLoans()
+      fetchNotebookOutputs()
     }
   }, [runId])
 
@@ -72,6 +82,42 @@ export default function RunDetail() {
       setRejectedLoans(response.data ?? [])
     } catch (error) {
       console.error('Failed to fetch rejected loans:', error)
+    }
+  }
+
+  const fetchNotebookOutputs = async () => {
+    if (!runId) return
+    setLoadingOutputs(true)
+    try {
+      const response = await axios.get(`/api/runs/${encodeURIComponent(runId)}/notebook-outputs`)
+      setNotebookOutputs(response.data?.outputs ?? [])
+    } catch (error) {
+      console.error('Failed to fetch notebook outputs:', error)
+      setNotebookOutputs([])
+    } finally {
+      setLoadingOutputs(false)
+    }
+  }
+
+  const downloadNotebookOutput = async (outputKey: string, filename: string) => {
+    if (!runId) return
+    try {
+      const response = await axios.get(
+        `/api/runs/${encodeURIComponent(runId)}/notebook-outputs/${encodeURIComponent(outputKey)}/download`,
+        { responseType: 'blob' }
+      )
+
+      const url = window.URL.createObjectURL(new Blob([response.data]))
+      const link = document.createElement('a')
+      link.href = url
+      link.setAttribute('download', filename)
+      document.body.appendChild(link)
+      link.click()
+      link.remove()
+      window.URL.revokeObjectURL(url)
+    } catch (error: any) {
+      console.error('Download failed:', error)
+      alert(`Download failed: ${error.response?.data?.detail || error.message}`)
     }
   }
 
@@ -163,6 +209,49 @@ export default function RunDetail() {
                 </div>
               ))}
             </div>
+          </div>
+        )}
+      </div>
+
+      {/* Notebook replacement outputs */}
+      <div className="bg-white shadow rounded-lg p-6 mb-6">
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="text-lg font-medium text-gray-900">Notebook outputs</h2>
+          <button
+            onClick={fetchNotebookOutputs}
+            disabled={loadingOutputs}
+            className="px-3 py-1.5 text-sm bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:opacity-50"
+          >
+            {loadingOutputs ? 'Refreshing…' : 'Refresh'}
+          </button>
+        </div>
+        <p className="text-sm text-gray-600 mb-4">
+          Download the four files produced by the notebook replacement: flagged loans, purchase price mismatch, CoMAP not passed, and notes flagged loans.
+        </p>
+        {loadingOutputs ? (
+          <div className="text-sm text-gray-500">Loading outputs…</div>
+        ) : notebookOutputs.length === 0 ? (
+          <div className="text-sm text-gray-500">No outputs found for this run yet.</div>
+        ) : (
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            {notebookOutputs.map((o) => {
+              const filename = o.path.split('/').pop() || `${o.key}.xlsx`
+              return (
+                <div key={o.key} className="flex items-center justify-between border rounded-md px-3 py-2">
+                  <div>
+                    <div className="text-sm font-medium text-gray-900">{o.label}</div>
+                    <div className="text-xs text-gray-500">{o.exists ? filename : 'Not generated'}</div>
+                  </div>
+                  <button
+                    onClick={() => downloadNotebookOutput(o.key, filename)}
+                    disabled={!o.exists}
+                    className="px-3 py-1.5 text-sm bg-gray-900 text-white rounded-md hover:bg-gray-800 disabled:opacity-50"
+                  >
+                    Download
+                  </button>
+                </div>
+              )
+            })}
           </div>
         )}
       </div>

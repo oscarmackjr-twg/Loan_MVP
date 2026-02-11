@@ -16,12 +16,12 @@ from rules.comap import check_comap_prime, check_comap_sfy, check_comap_notes
 from rules.eligibility import check_eligibility_prime, check_eligibility_sfy
 from outputs.excel_exports import export_exception_reports
 from outputs.eligibility_reports import export_eligibility_report
+from storage import get_storage_backend
 from db.models import PipelineRun, RunStatus, LoanException, LoanFact
 from db.connection import SessionLocal
 from config.settings import settings
 from utils.date_utils import calculate_pipeline_dates
 from utils.file_discovery import discover_input_files
-from utils.path_utils import get_sales_team_output_path, get_sales_team_share_path
 from utils.json_serial import to_json_safe
 from config.rejection_criteria import (
     get_rejection_criteria,
@@ -390,25 +390,29 @@ class PipelineExecutor:
             notes_flagged_df = buy_df[buy_df['SELLER Loan #'].isin(flagged_notes)]
             comap_failed_df = buy_df[buy_df['SELLER Loan #'].isin([i[0] for i in loan_not_in_comap])]
             
-            # Export reports (with sales team isolation)
-            output_dir = get_sales_team_output_path(
-                folder,
-                self.context.sales_team_id
-            )
-            output_share_dir = get_sales_team_share_path(
-                folder,
-                self.context.sales_team_id
-            )
+            # Export reports to configured storage (local in dev, S3 in test/prod).
+            # Store per-run outputs under a stable prefix so the frontend can download them.
+            output_prefix = self.context.output_dir or f"runs/{self.context.run_id}"
+            share_prefix = output_prefix
+            storage_outputs = get_storage_backend(area="outputs")
+            storage_share = get_storage_backend(area="output_share")
+
             reports = export_exception_reports(
-                purchase_mismatch, flagged_df, notes_flagged_df, comap_failed_df,
-                output_dir, output_share_dir
+                purchase_mismatch,
+                flagged_df,
+                notes_flagged_df,
+                comap_failed_df,
+                output_prefix=output_prefix,
+                output_share_prefix=share_prefix,
+                storage=storage_outputs,
+                share_storage=storage_share,
             )
             
             # Export eligibility check results
             eligibility_report_path = export_eligibility_report(
                 eligibility_prime,
                 eligibility_sfy,
-                output_dir
+                f"{settings.OUTPUT_DIR}/{output_prefix}" if settings.STORAGE_TYPE == "local" else f"/tmp/{output_prefix}"
             )
             reports['eligibility_report'] = eligibility_report_path
             
