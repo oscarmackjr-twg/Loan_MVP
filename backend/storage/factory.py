@@ -30,7 +30,7 @@ def get_storage_backend(
 
     Args:
         storage_type: Storage type ("local" or "s3"). If None, uses STORAGE_TYPE from settings.
-        area: Logical storage area: "inputs", "outputs", or "output_share".
+        area: Logical storage area: "inputs", "outputs", "output_share", or "archive".
         base_path: Override base path/prefix. For local it's a directory; for S3 it's a key prefix.
 
     Returns:
@@ -44,6 +44,8 @@ def get_storage_backend(
                 base_path = settings.OUTPUT_DIR
             elif area == "output_share":
                 base_path = settings.OUTPUT_SHARE_DIR
+            elif area == "archive":
+                base_path = settings.ARCHIVE_DIR
             else:
                 base_path = settings.INPUT_DIR
         return LocalStorageBackend(base_path=base_path)
@@ -52,7 +54,7 @@ def get_storage_backend(
         if not settings.S3_BUCKET_NAME:
             raise ValueError("S3_BUCKET_NAME must be set when using S3 storage")
 
-        # Default S3 prefix: <S3_BASE_PREFIX>/<area>
+        # Default S3 prefix: <S3_BASE_PREFIX>/<area> (inputs, outputs, output_share, archive)
         if base_path is None:
             base_path = _join_prefix(settings.S3_BASE_PREFIX or "", area)
 

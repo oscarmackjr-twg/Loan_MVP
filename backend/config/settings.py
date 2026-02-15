@@ -1,5 +1,5 @@
 """Application configuration and settings."""
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 from typing import Optional
 import os
 from pathlib import Path
@@ -7,6 +7,17 @@ from pathlib import Path
 
 class Settings(BaseSettings):
     """Application settings loaded from environment variables."""
+
+    # Pydantic v2 settings config:
+    # - Ignore extra env vars (e.g. AWS_PROFILE in dev/containers)
+    # - Still load from .env when present
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        case_sensitive=True,
+        env_ignore_empty=True,
+        extra="ignore",
+    )
     
     # Database
     DATABASE_URL: str = "postgresql://postgres:postgres@localhost:5432/loan_engine"
@@ -21,6 +32,7 @@ class Settings(BaseSettings):
     INPUT_DIR: str = "./data/inputs"
     OUTPUT_DIR: str = "./data/outputs"
     OUTPUT_SHARE_DIR: str = "./data/output_share"
+    ARCHIVE_DIR: str = "./data/archive"  # Per-run archive: archive/{run_id}/input, archive/{run_id}/output
     
     # S3 Configuration (required when STORAGE_TYPE=s3)
     S3_BUCKET_NAME: Optional[str] = None
@@ -44,14 +56,6 @@ class Settings(BaseSettings):
     LOG_LEVEL: str = "INFO"
     LOG_FILE: Optional[str] = None
     
-    class Config:
-        env_file = ".env"
-        env_file_encoding = "utf-8"
-        case_sensitive = True
-        # Ignore .env file parsing errors (use defaults if file has issues)
-        env_ignore_empty = True
-
-
 # Load settings
 # Note: If .env file has parsing errors, pydantic-settings will show a warning
 # but the application will still start using defaults and environment variables

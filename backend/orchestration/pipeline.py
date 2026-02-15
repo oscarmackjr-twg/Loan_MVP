@@ -18,6 +18,7 @@ from outputs.excel_exports import export_exception_reports
 from outputs.eligibility_reports import export_eligibility_report
 from storage import get_storage_backend
 from db.models import PipelineRun, RunStatus, LoanException, LoanFact
+from orchestration.archive_run import archive_run
 from db.connection import SessionLocal
 from config.settings import settings
 from utils.date_utils import calculate_pipeline_dates
@@ -440,6 +441,18 @@ class PipelineExecutor:
                 total_loans=len(final_df),
                 total_balance=float(final_df['Orig. Balance'].sum()),
                 exceptions_count=len(all_exceptions)
+            )
+            
+            # Archive input and output files to archive/{run_id}/input and archive/{run_id}/output
+            eligibility_report_path = reports.get("eligibility_report")
+            archive_run(
+                run_id=self.context.run_id,
+                folder=folder,
+                pdate=self.context.pdate,
+                output_prefix=output_prefix,
+                reports=reports,
+                output_storage=storage_outputs,
+                eligibility_report_local_path=eligibility_report_path,
             )
             
             # Store eligibility results in run record
