@@ -16,21 +16,25 @@ from db.models import *  # noqa: F401, F403
 from config.settings import settings
 
 
-def init_database(drop_existing: bool = False):
+def init_database(drop_existing: bool = False, force: bool = False):
     """Initialize database tables.
     
     Args:
         drop_existing: If True, drop all existing tables before creating new ones.
                       WARNING: This will delete all data!
+        force: If True and drop_existing is True, skip confirmation prompt (for non-interactive use).
     """
     print(f"Connecting to database: {settings.DATABASE_URL.split('@')[-1] if '@' in settings.DATABASE_URL else settings.DATABASE_URL}")
     
     if drop_existing:
         print("WARNING: Dropping all existing tables...")
-        response = input("This will delete all data. Continue? (yes/no): ")
-        if response.lower() != 'yes':
-            print("Aborted.")
-            return
+        if not force:
+            response = input("This will delete all data. Continue? (yes/no): ")
+            if response.lower() != 'yes':
+                print("Aborted.")
+                return
+        else:
+            print("Proceeding without confirmation (--yes).")
     
     try:
         if drop_existing:
@@ -66,7 +70,12 @@ if __name__ == "__main__":
         action="store_true",
         help="Drop existing tables before creating new ones (WARNING: deletes all data)"
     )
+    parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="With --drop-existing, skip confirmation prompt (for scripts/automation)"
+    )
     
     args = parser.parse_args()
     
-    init_database(drop_existing=args.drop_existing)
+    init_database(drop_existing=args.drop_existing, force=args.yes)

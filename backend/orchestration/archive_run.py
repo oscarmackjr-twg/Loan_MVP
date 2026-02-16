@@ -1,4 +1,9 @@
-"""Archive input and output files for each pipeline run under archive root: {run_id}/input and {run_id}/output."""
+"""Archive input and output files for each pipeline run under archive root: {run_id}/input and {run_id}/output.
+
+- Input files are read from the input directory; outputs are written to the output directory.
+- At the start of a new run, the previous run is archived (its output dir and, when available, input prefix).
+- At the end of a run, the current run is also archived (inputs from run folder, outputs from storage).
+"""
 import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -164,3 +169,75 @@ def archive_run(
         )
     except Exception as e:
         logger.exception("Run archive failed for %s: %s", run_id, e)
+
+
+def _is_s3_style_prefix(path: Optional[str]) -> bool:
+    """True if path looks like an S3 prefix (no drive letter or absolute path)."""
+    if not path or not path.strip():
+        return False
+    p = path.strip().replace("\\", "/")
+    if ":" in p or p.startswith("/"):
+        return False
+    return True
+
+
+def archive_previous_run(prev_run_id: str, output_prefix: str, input_prefix: Optional[str] = None) -> None:
+    """
+    Archive the previous run at the start of a new run.
+    Copies all files under output_prefix to archive/{prev_run_id}/output.
+    If input_prefix is set and looks like an S3/key prefix (not a local path), copies from input storage to archive/{prev_run_id}/input.
+    Safe to call if archive or storage is unavailable (logs and returns).
+    """
+    try:
+        archive_storage = get_storage_backend(area="archive")
+        output_storage = get_storage_backend(area="outputs")
+    except Exception as e:
+        logger.warning("Storage not available for previous-run archive: %s", e)
+        return
+
+    out_count = 0
+    try:
+        # Archive previous run's output directory (list all files under output_prefix, copy to archive)
+        out_prefix = (output_prefix or "").strip("/")
+        if out_prefix:
+            files = output_storage.list_files(out_prefix, recursive=True)
+            archive_out_prefix = f"{prev_run_id}/output"
+            archive_storage.create_directory(archive_out_prefix)
+            for f in files:
+                if f.is_directory or f.path.endswith("/"):
+                    continue
+                try:
+                    content = output_storage.read_file(f.path)
+                    name = Path(f.path).name
+                    archive_storage.write_file(f"{archive_out_prefix}/{name}", content)
+                    out_count += 1
+                except Exception as e:
+                    logger.warning("Failed to archive previous output %s: %s", f.path, e)
+            if out_count:
+                logger.info("Archived previous run %s: %d output file(s) -> %s", prev_run_id, out_count, archive_out_prefix)
+    except Exception as e:
+        logger.warning("Failed to archive previous run outputs: %s", e)
+
+    # Optionally archive previous run's inputs from input storage (when it's an S3-style prefix)
+    if input_prefix and _is_s3_style_prefix(input_prefix):
+        try:
+            input_storage = get_storage_backend(area="inputs")
+            list_prefix = f"{input_prefix.strip('/')}/"
+            files = input_storage.list_files(list_prefix, recursive=True)
+            archive_in_prefix = f"{prev_run_id}/input"
+            archive_storage.create_directory(archive_in_prefix)
+            in_count = 0
+            for f in files:
+                if f.is_directory or f.path.endswith("/"):
+                    continue
+                try:
+                    content = input_storage.read_file(f.path)
+                    name = Path(f.path).name
+                    archive_storage.write_file(f"{archive_in_prefix}/{name}", content)
+                    in_count += 1
+                except Exception as e:
+                    logger.warning("Failed to archive previous input %s: %s", f.path, e)
+            if in_count:
+                logger.info("Archived previous run %s: %d input file(s) -> %s", prev_run_id, in_count, archive_in_prefix)
+        except Exception as e:
+            logger.debug("Could not archive previous run inputs from storage: %s", e)

@@ -2,8 +2,8 @@
 import io
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, HTTPException, Query
-from fastapi.responses import Response, StreamingResponse
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 from typing import List, Optional
 import pandas as pd
@@ -16,6 +16,8 @@ from auth.validators import get_user_sales_team_id, validate_sales_team_access
 from auth.audit import log_data_access, log_authorization_failure
 from orchestration.run_context import RunContext
 from orchestration.pipeline import PipelineExecutor
+from orchestration.s3_input_sync import sync_s3_input_to_temp, remove_temp_input_dir
+from orchestration.archive_run import archive_previous_run
 from config.settings import settings
 from storage import get_storage_backend
 
@@ -33,6 +35,7 @@ class RunCreate(BaseModel):
     """Pipeline run creation model."""
     pdate: Optional[str] = None
     irr_target: float = 8.05
+    # Local: filesystem path to input folder. S3 (AWS): key prefix under inputs area (e.g. "legacy", "sales_team_1").
     folder: str = "C:/Users/omack/Intrepid/pythonFramework/loan_engine/legacy"
 
 
@@ -107,6 +110,16 @@ def filter_by_sales_team(query, user: User):
         return query  # Analysts see all for now
 
 
+@router.get("/config")
+async def get_config(current_user: User = Depends(get_current_user)):
+    """Return app config for the UI (e.g. storage type, S3 bucket when using S3)."""
+    out = {"storage_type": settings.STORAGE_TYPE}
+    if settings.STORAGE_TYPE == "s3" and settings.S3_BUCKET_NAME:
+        out["s3_bucket_name"] = settings.S3_BUCKET_NAME
+        out["s3_region"] = settings.S3_REGION or "us-east-1"
+    return out
+
+
 @router.post("/pipeline/run", response_model=RunResponse)
 async def create_pipeline_run(
     run_data: RunCreate,
@@ -126,9 +139,8 @@ async def create_pipeline_run(
     )
     
     # Add sales team ID to file paths for isolation.
-    # Inputs are currently sourced from the provided folder (dev use-case).
-    # Outputs are stored under a stable per-run prefix so they can be served from local disk (dev)
-    # or S3 (test/prod) and downloaded from the UI.
+    # Inputs go to input directory; outputs go to output directory.
+    # At the start of a run, the previous run is archived; at the end, the current run is archived.
     if sales_team_id:
         context.input_file_path = f"{run_data.folder}/sales_team_{sales_team_id}"
         context.output_dir = f"sales_team_{sales_team_id}/runs/{context.run_id}"
@@ -136,10 +148,45 @@ async def create_pipeline_run(
         context.input_file_path = run_data.folder
         context.output_dir = f"runs/{context.run_id}"
     
-    # Execute pipeline
+    # At the start of this run, archive the previous run (outputs and, when S3, inputs from storage).
+    prev_run_query = db.query(PipelineRun).order_by(PipelineRun.created_at.desc()).limit(1)
+    prev_run_query = filter_by_sales_team(prev_run_query, current_user)
+    prev_run = prev_run_query.first()
+    if prev_run and prev_run.run_id != context.run_id:
+        archive_previous_run(
+            prev_run_id=prev_run.run_id,
+            output_prefix=prev_run.output_dir or f"runs/{prev_run.run_id}",
+            input_prefix=prev_run.input_file_path,
+        )
+    
+    # When using S3, run reads from inputs/input/input/ (prefix "input/input"); temp dir gets files_required/ at top level.
+    temp_dir = None
+    if settings.STORAGE_TYPE == "s3":
+        s3_prefix = "input/input"
+        try:
+            input_storage = get_storage_backend(area="inputs")
+            temp_dir = sync_s3_input_to_temp(input_storage, s3_prefix)
+            folder_for_run = temp_dir
+        except FileNotFoundError as e:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "No files found in 'input/input/files_required/'. "
+                    "In File Manager, upload to path 'input/input/files_required' (files go there by default). "
+                    "Then start the pipeline run again."
+                ),
+            ) from e
+        except Exception as e:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Failed to load inputs from S3 input directory: {str(e)}",
+            ) from e
+    else:
+        folder_for_run = run_data.folder
+    
     try:
         with PipelineExecutor(context) as executor:
-            result = executor.execute(run_data.folder)
+            result = executor.execute(folder_for_run)
         
         # Get updated run record
         run_record = db.query(PipelineRun).filter(PipelineRun.run_id == context.run_id).first()
@@ -147,10 +194,14 @@ async def create_pipeline_run(
         
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Pipeline execution failed: {str(e)}")
+    finally:
+        if temp_dir:
+            remove_temp_input_dir(temp_dir)
 
 
 @router.get("/runs", response_model=List[RunResponse])
 async def list_runs(
+    response: Response,
     skip: int = Query(0, ge=0),
     limit: int = Query(100, ge=1, le=1000),
     status: Optional[str] = None,
@@ -159,6 +210,7 @@ async def list_runs(
     current_user: User = Depends(get_current_user)
 ):
     """List pipeline runs with pagination. Filter by run_weekday for day-of-week segregation."""
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
     query = db.query(PipelineRun)
     
     # Apply sales team filter
@@ -278,6 +330,91 @@ async def download_notebook_output(
         io.BytesIO(content),
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": f'attachment; filename="{match["filename"]}"'},
+    )
+
+
+@router.get("/runs/{run_id}/archive")
+async def list_run_archive(
+    run_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    List archived input and output files for a run (archive/{run_id}/input and archive/{run_id}/output).
+    """
+    query = db.query(PipelineRun).filter(PipelineRun.run_id == run_id)
+    query = filter_by_sales_team(query, current_user)
+    run = query.first()
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+
+    try:
+        storage = get_storage_backend(area="archive")
+    except Exception:
+        return {"run_id": run_id, "input": [], "output": [], "error": "Archive storage not configured"}
+
+    def list_dir(prefix: str, download_prefix: str):
+        try:
+            files = storage.list_files(prefix, recursive=False)
+            return [
+                {
+                    "path": f.path,
+                    "size": f.size,
+                    "last_modified": f.last_modified,
+                    "name": f.path.split("/")[-1] if "/" in f.path else f.path,
+                    "download_path": f"{download_prefix}/{f.path.split('/')[-1]}" if "/" in f.path else f"{download_prefix}/{f.path}",
+                }
+                for f in files if not f.is_directory
+            ]
+        except Exception:
+            return []
+
+    input_prefix = f"{run_id}/input"
+    output_prefix = f"{run_id}/output"
+    input_files = list_dir(input_prefix, "input")
+    output_files = list_dir(output_prefix, "output")
+    return {"run_id": run_id, "input": input_files, "output": output_files}
+
+
+@router.get("/runs/{run_id}/archive/download")
+async def download_run_archive_file(
+    run_id: str,
+    path: str = Query(..., description="Path relative to run archive: input/filename or output/filename"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Download a file from the run archive (input or output)."""
+    if ".." in path or path.strip("/").startswith(".."):
+        raise HTTPException(status_code=400, detail="Invalid path")
+    if not (path.startswith("input/") or path.startswith("output/")):
+        raise HTTPException(status_code=400, detail="Path must be input/... or output/...")
+    query = db.query(PipelineRun).filter(PipelineRun.run_id == run_id)
+    query = filter_by_sales_team(query, current_user)
+    run = query.first()
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+
+    full_key = f"{run_id}/{path}"
+    try:
+        storage = get_storage_backend(area="archive")
+    except Exception as e:
+        raise HTTPException(status_code=503, detail="Archive storage not available") from e
+    if not storage.file_exists(full_key):
+        raise HTTPException(status_code=404, detail="File not found")
+
+    content = storage.read_file(full_key)
+    filename = path.split("/")[-1]
+    media_type = "application/octet-stream"
+    if filename.endswith(".xlsx"):
+        media_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    elif filename.endswith(".csv"):
+        media_type = "text/csv"
+    elif filename.endswith(".json"):
+        media_type = "application/json"
+    return StreamingResponse(
+        io.BytesIO(content),
+        media_type=media_type,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 
 

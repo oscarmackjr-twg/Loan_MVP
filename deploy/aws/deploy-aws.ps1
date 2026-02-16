@@ -26,7 +26,13 @@ param(
     [switch]$SkipBuild = $false,
     
     [Parameter(Mandatory=$false)]
-    [string]$Profile = ""  # AWS CLI profile name (e.g., AWSAdministratorAccess-014148916722)
+    [string]$Profile = "",  # AWS CLI profile name (e.g., AWSAdministratorAccess-014148916722)
+    
+    [Parameter(Mandatory=$false)]
+    [string]$S3BucketName = "",  # If set, app uses S3 for inputs/outputs/archive (pipeline reads from S3 prefix, archives after run)
+    
+    [Parameter(Mandatory=$false)]
+    [string]$S3BasePrefix = ""   # Optional prefix for S3 paths (e.g. "loan-engine/test")
 )
 
 # Error handling
@@ -169,6 +175,8 @@ try {
     }
 } catch { }
 
+# Capture whether user explicitly provided DB password (to fix secret when RDS already exists)
+$UserProvidedDBPassword = -not [string]::IsNullOrEmpty($DBPassword)
 # Generate passwords if not provided
 if ([string]::IsNullOrEmpty($DBPassword)) {
     $DBPassword = New-RandomPassword -Length 24 -RdsSafe
@@ -488,6 +496,36 @@ if (-not $existingTaskAppRole) {
     }
 }
 
+# When using S3, attach S3 policy to task role so the app can read/write inputs, outputs, and archive
+if (-not [string]::IsNullOrEmpty($S3BucketName)) {
+    $bucketArn = "arn:aws:s3:::$S3BucketName"
+    $bucketPrefixArn = "arn:aws:s3:::$S3BucketName/*"
+    $s3Policy = @{
+        Version = "2012-10-17"
+        Statement = @(
+            @{
+                Effect = "Allow"
+                Action = @("s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:ListBucket")
+                Resource = @($bucketPrefixArn)
+            }
+            @{
+                Effect = "Allow"
+                Action = @("s3:ListBucket")
+                Resource = $bucketArn
+            }
+        )
+    } | ConvertTo-Json -Depth 10 -Compress
+    $s3PolicyFile = "$env:TEMP\ecs-s3-policy.json"
+    $utf8NoBom = New-Object System.Text.UTF8Encoding $false
+    [System.IO.File]::WriteAllText($s3PolicyFile, $s3Policy, $utf8NoBom)
+    Invoke-AwsCli iam put-role-policy --role-name $TaskRoleName --policy-name S3StoragePolicy --policy-document "file://$s3PolicyFile" | Out-Null
+    if ($LASTEXITCODE -eq 0) {
+        Write-Success "Attached S3 policy to Task Role for bucket: $S3BucketName"
+    } else {
+        Write-Warning "Failed to attach S3 policy. Ensure the task role has S3 access to $S3BucketName for pipeline inputs/outputs/archive."
+    }
+}
+
 # ============================================
 # 5. Create RDS Database
 # ============================================
@@ -538,6 +576,7 @@ try {
 Write-Info "Using PostgreSQL engine version: $pgVersion"
 
 $existingDb = Invoke-AwsCli rds describe-db-instances --db-instance-identifier $DBInstanceIdentifier --region $Region 2>$null
+$RdsCreatedInThisRun = $false
 if ($existingDb) {
     Write-Warning "RDS instance already exists: $DBInstanceIdentifier"
     $DBEndpoint = (Invoke-AwsCli rds describe-db-instances --db-instance-identifier $DBInstanceIdentifier --query "DBInstances[0].Endpoint.Address" --output text --region $Region)
@@ -577,24 +616,54 @@ if ($existingDb) {
     
     $DBEndpoint = (Invoke-AwsCli rds describe-db-instances --db-instance-identifier $DBInstanceIdentifier --query "DBInstances[0].Endpoint.Address" --output text --region $Region)
     Write-Success "RDS instance created: $DBEndpoint"
+    $RdsCreatedInThisRun = $true
 }
-
-$DatabaseUrl = "postgresql://${DBUsername}:${DBPassword}@${DBEndpoint}:5432/${DBName}?sslmode=require"
 
 # ============================================
 # 6. Create Secrets Manager Secrets
 # ============================================
 Write-Info "[6/10] Creating Secrets Manager secrets..."
 
-# Database URL Secret
 $DbSecretName = "$AppName/$Environment/DATABASE_URL"
-try {
-    $existingDbSecret = Invoke-AwsCli secretsmanager describe-secret --secret-id $DbSecretName --region $Region 2>$null
-    Write-Warning "Secret already exists: $DbSecretName"
-    Invoke-AwsCli secretsmanager update-secret --secret-id $DbSecretName --secret-string $DatabaseUrl --region $Region | Out-Null
-} catch {
-    Invoke-AwsCli secretsmanager create-secret --name $DbSecretName --secret-string $DatabaseUrl --region $Region | Out-Null
-    Write-Success "Created secret: $DbSecretName"
+# When RDS already existed, do NOT overwrite the secret with a new password (which was just generated and doesn't match RDS).
+# Use the existing secret value so app/tasks can connect. Only create/update the secret when we created RDS in this run.
+if ($RdsCreatedInThisRun) {
+    $DatabaseUrl = "postgresql://${DBUsername}:${DBPassword}@${DBEndpoint}:5432/${DBName}?sslmode=require"
+    try {
+        $existingDbSecret = Invoke-AwsCli secretsmanager describe-secret --secret-id $DbSecretName --region $Region 2>$null
+        Write-Warning "Secret already exists: $DbSecretName (updating with new RDS password)"
+        Invoke-AwsCli secretsmanager update-secret --secret-id $DbSecretName --secret-string $DatabaseUrl --region $Region | Out-Null
+    } catch {
+        Invoke-AwsCli secretsmanager create-secret --name $DbSecretName --secret-string $DatabaseUrl --region $Region | Out-Null
+        Write-Success "Created secret: $DbSecretName"
+    }
+} else {
+    # RDS already exists: use existing secret so we don't overwrite with a wrong (newly generated) password.
+    # If user passed -DBPassword, they are providing the actual RDS password to fix the secret — update it.
+    if ($UserProvidedDBPassword) {
+        $DatabaseUrl = "postgresql://${DBUsername}:${DBPassword}@${DBEndpoint}:5432/${DBName}?sslmode=require"
+        try {
+            Invoke-AwsCli secretsmanager update-secret --secret-id $DbSecretName --secret-string $DatabaseUrl --region $Region | Out-Null
+            Write-Success "Updated $DbSecretName with provided -DBPassword (RDS and secret now in sync)"
+        } catch {
+            Invoke-AwsCli secretsmanager create-secret --name $DbSecretName --secret-string $DatabaseUrl --region $Region | Out-Null
+            Write-Success "Created secret: $DbSecretName"
+        }
+    } else {
+        $existingDbUrl = Invoke-AwsCli secretsmanager get-secret-value --secret-id $DbSecretName --region $Region --query SecretString --output text 2>$null
+        if ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace($existingDbUrl)) {
+            $DatabaseUrl = $existingDbUrl.Trim()
+            Write-Info "Using existing DATABASE_URL from Secrets Manager (RDS password unchanged)"
+        } else {
+            Write-Error "RDS instance exists but secret $DbSecretName is missing or empty. To fix: (1) Set RDS master password in AWS Console (RDS -> loan-engine-test-db -> Modify -> Master password). (2) Run: .\deploy\aws\deploy-aws.ps1 -Region us-east-1 -DBPassword 'YourNewRdsPassword' -Profile AWSAdministratorAccess-014148916722"
+            exit 1
+        }
+    }
+}
+
+# Ensure $DatabaseUrl is set for task definition when RDS was created in this run (already set above)
+if (-not $DatabaseUrl) {
+    $DatabaseUrl = (Invoke-AwsCli secretsmanager get-secret-value --secret-id $DbSecretName --region $Region --query SecretString --output text 2>$null).Trim()
 }
 
 # SECRET_KEY Secret
@@ -768,6 +837,22 @@ try {
     Write-Warning "ECS cluster may already exist"
 }
 
+# Build task environment (add S3 vars when S3BucketName is set so pipeline uses S3 for inputs/outputs/archive)
+$taskEnv = @(
+    @{ name = "CORS_ORIGINS"; value = '["http://' + $AlbDnsName + '"]' }
+    @{ name = "ENABLE_SCHEDULER"; value = "true" }
+    @{ name = "NODE_ENV"; value = "production" }
+)
+if (-not [string]::IsNullOrEmpty($S3BucketName)) {
+    $taskEnv += @{ name = "STORAGE_TYPE"; value = "s3" }
+    $taskEnv += @{ name = "S3_BUCKET_NAME"; value = $S3BucketName }
+    $taskEnv += @{ name = "S3_REGION"; value = $Region }
+    if (-not [string]::IsNullOrEmpty($S3BasePrefix)) {
+        $taskEnv += @{ name = "S3_BASE_PREFIX"; value = $S3BasePrefix }
+    }
+    Write-Info "Task will use S3: bucket=$S3BucketName, prefix=$S3BasePrefix"
+}
+
 # Create Task Definition
 $TaskDefFile = "$env:TEMP\task-definition.json"
 $taskDefinition = @{
@@ -789,20 +874,7 @@ $taskDefinition = @{
                     protocol = "tcp"
                 }
             )
-            environment = @(
-                @{
-                    name = "CORS_ORIGINS"
-                    value = '["http://' + $AlbDnsName + '"]'
-                }
-                @{
-                    name = "ENABLE_SCHEDULER"
-                    value = "true"
-                }
-                @{
-                    name = "NODE_ENV"
-                    value = "production"
-                }
-            )
+            environment = $taskEnv
             secrets = @(
                 @{
                     name = "DATABASE_URL"

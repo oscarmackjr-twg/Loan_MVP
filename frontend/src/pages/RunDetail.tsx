@@ -37,14 +37,31 @@ interface NotebookOutput {
   exists: boolean
 }
 
+interface ArchiveFile {
+  path: string
+  size: number
+  last_modified: string | null
+  name: string
+  download_path: string
+}
+
+interface ArchiveResponse {
+  run_id: string
+  input: ArchiveFile[]
+  output: ArchiveFile[]
+  error?: string
+}
+
 export default function RunDetail() {
   const { runId } = useParams<{ runId: string }>()
   const [run, setRun] = useState<RunDetail | null>(null)
   const [summary, setSummary] = useState<Summary | null>(null)
   const [rejectedLoans, setRejectedLoans] = useState<RejectedLoan[]>([])
   const [notebookOutputs, setNotebookOutputs] = useState<NotebookOutput[]>([])
+  const [archive, setArchive] = useState<ArchiveResponse | null>(null)
   const [loading, setLoading] = useState(true)
   const [loadingOutputs, setLoadingOutputs] = useState(false)
+  const [loadingArchive, setLoadingArchive] = useState(false)
 
   useEffect(() => {
     if (runId) {
@@ -52,6 +69,7 @@ export default function RunDetail() {
       fetchSummary()
       fetchRejectedLoans()
       fetchNotebookOutputs()
+      fetchArchive()
     }
   }, [runId])
 
@@ -107,6 +125,41 @@ export default function RunDetail() {
         { responseType: 'blob' }
       )
 
+      const url = window.URL.createObjectURL(new Blob([response.data]))
+      const link = document.createElement('a')
+      link.href = url
+      link.setAttribute('download', filename)
+      document.body.appendChild(link)
+      link.click()
+      link.remove()
+      window.URL.revokeObjectURL(url)
+    } catch (error: any) {
+      console.error('Download failed:', error)
+      alert(`Download failed: ${error.response?.data?.detail || error.message}`)
+    }
+  }
+
+  const fetchArchive = async () => {
+    if (!runId) return
+    setLoadingArchive(true)
+    try {
+      const response = await axios.get(`/api/runs/${encodeURIComponent(runId)}/archive`)
+      setArchive(response.data ?? { run_id: runId, input: [], output: [] })
+    } catch (error) {
+      console.error('Failed to fetch archive:', error)
+      setArchive({ run_id: runId!, input: [], output: [] })
+    } finally {
+      setLoadingArchive(false)
+    }
+  }
+
+  const downloadArchiveFile = async (downloadPath: string, filename: string) => {
+    if (!runId) return
+    try {
+      const response = await axios.get(
+        `/api/runs/${encodeURIComponent(runId)}/archive/download?path=${encodeURIComponent(downloadPath)}`,
+        { responseType: 'blob' }
+      )
       const url = window.URL.createObjectURL(new Blob([response.data]))
       const link = document.createElement('a')
       link.href = url
@@ -252,6 +305,65 @@ export default function RunDetail() {
                 </div>
               )
             })}
+          </div>
+        )}
+      </div>
+
+      {/* Archive: input and output files stored per run */}
+      <div className="bg-white shadow rounded-lg p-6 mb-6">
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="text-lg font-medium text-gray-900">Archive</h2>
+          <button
+            onClick={fetchArchive}
+            disabled={loadingArchive}
+            className="px-3 py-1.5 text-sm bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:opacity-50"
+          >
+            {loadingArchive ? 'Refreshing…' : 'Refresh'}
+          </button>
+        </div>
+        <p className="text-sm text-gray-600 mb-4">
+          Input and output files archived for this run (archive/{runId}/input and archive/{runId}/output).
+        </p>
+        {loadingArchive ? (
+          <div className="text-sm text-gray-500">Loading archive…</div>
+        ) : archive?.error ? (
+          <div className="text-sm text-amber-600">{archive.error}</div>
+        ) : (archive?.input?.length ?? 0) === 0 && (archive?.output?.length ?? 0) === 0 ? (
+          <div className="text-sm text-gray-500">No archived files for this run.</div>
+        ) : (
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+            <div>
+              <h3 className="text-sm font-medium text-gray-700 mb-2">Input</h3>
+              <ul className="space-y-1">
+                {(archive?.input ?? []).map((f) => (
+                  <li key={f.download_path} className="flex items-center justify-between border rounded px-3 py-2 text-sm">
+                    <span className="font-medium text-gray-900 truncate" title={f.name}>{f.name}</span>
+                    <button
+                      onClick={() => downloadArchiveFile(f.download_path, f.name)}
+                      className="ml-2 px-2 py-1 text-xs bg-gray-900 text-white rounded hover:bg-gray-800"
+                    >
+                      Download
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </div>
+            <div>
+              <h3 className="text-sm font-medium text-gray-700 mb-2">Output</h3>
+              <ul className="space-y-1">
+                {(archive?.output ?? []).map((f) => (
+                  <li key={f.download_path} className="flex items-center justify-between border rounded px-3 py-2 text-sm">
+                    <span className="font-medium text-gray-900 truncate" title={f.name}>{f.name}</span>
+                    <button
+                      onClick={() => downloadArchiveFile(f.download_path, f.name)}
+                      className="ml-2 px-2 py-1 text-xs bg-gray-900 text-white rounded hover:bg-gray-800"
+                    >
+                      Download
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </div>
           </div>
         )}
       </div>

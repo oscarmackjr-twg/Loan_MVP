@@ -5,6 +5,7 @@ from typing import Optional
 from storage import get_storage_backend
 from auth.security import get_current_user
 from db.models import User
+from config.settings import settings
 import io
 import logging
 
@@ -51,17 +52,26 @@ async def upload_file(
     storage_type: Optional[str] = Query(None, description="Override storage type (local/s3)"),
     current_user: User = Depends(get_current_user)
 ):
-    """Upload a file."""
+    """Upload a file. When using S3, uploads always go to the inputs area so the pipeline can read them."""
     try:
-        storage = get_storage_backend(storage_type=storage_type, area=area)
+        # Per spec: dropped files must land in the input directory. When S3 is used, force inputs area.
+        effective_area = area
+        if (storage_type or settings.STORAGE_TYPE) == "s3":
+            effective_area = "inputs"
+        storage = get_storage_backend(storage_type=storage_type, area=effective_area)
+        
+        # When S3, default path so files drop into input/input/files_required/
+        effective_path = (path or "").strip()
+        if (storage_type or settings.STORAGE_TYPE) == "s3" and not effective_path:
+            effective_path = "input/input/files_required/"
         
         # Determine destination path
-        if path and not path.endswith("/"):
+        if effective_path and not effective_path.endswith("/"):
             # If path doesn't end with /, treat as full file path
-            dest_path = path
+            dest_path = effective_path
         else:
             # Use filename in the specified directory
-            dest_path = f"{path.rstrip('/')}/{file.filename}" if path else file.filename
+            dest_path = f"{effective_path.rstrip('/')}/{file.filename}" if effective_path else file.filename
         
         # Read file content
         content = await file.read()
@@ -74,9 +84,17 @@ async def upload_file(
             "path": dest_path,
             "size": len(content)
         }
+    except ValueError as e:
+        # S3 NoSuchBucket or other clear config errors
+        logger.error("Upload error: %s", e)
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         logger.error(f"Error uploading file: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to upload file: {str(e)}")
+        detail = str(e)
+        if "NoSuchBucket" in detail or "bucket" in detail.lower():
+            if getattr(settings, "S3_BUCKET_NAME", None):
+                detail = f"{detail} (Configured bucket: {settings.S3_BUCKET_NAME}. Create it in S3 or set S3_BUCKET_NAME to an existing bucket.)"
+        raise HTTPException(status_code=500, detail=f"Failed to upload file: {detail}")
 
 
 @router.get("/download/{file_path:path}")

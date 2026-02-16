@@ -8,13 +8,23 @@ interface FileInfo {
   last_modified: string | null
 }
 
+const S3_DEFAULT_UPLOAD_PATH = 'input/input/files_required/'
+
 export default function FileManager() {
-  const area = 'outputs'
+  const area = 'inputs'
   const [currentPath, setCurrentPath] = useState('')
   const [files, setFiles] = useState<FileInfo[]>([])
   const [loading, setLoading] = useState(false)
   const [uploading, setUploading] = useState(false)
   const [dragActive, setDragActive] = useState(false)
+
+  useEffect(() => {
+    axios.get('/api/config').then((r) => {
+      if ((r.data?.storage_type ?? 'local') === 's3') {
+        setCurrentPath(S3_DEFAULT_UPLOAD_PATH)
+      }
+    }).catch(() => {})
+  }, [])
 
   useEffect(() => {
     loadFiles()
@@ -179,6 +189,9 @@ export default function FileManager() {
       <div className="mb-4">
         <div className="text-sm text-gray-600">
           <span className="font-medium">Current Path:</span> {currentPath || '/'}
+        </div>
+        <div className="text-xs text-gray-500 mt-1">
+          Input area — files drop into &quot;input/input/files_required/&quot;. Pipeline reads from there. Keep this path when uploading.
         </div>
       </div>
 

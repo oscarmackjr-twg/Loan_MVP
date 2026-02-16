@@ -2,6 +2,8 @@
 
 This directory contains scripts to deploy the Loan Engine application to AWS from scratch.
 
+**Multiple web apps from the same account:** To run several Loan Engine deployments (e.g. dev, test, prod) each with its **own URL**, use [Elastic Beanstalk](ELASTIC_BEANSTALK_COOKBOOK.md). The [EB cookbook](ELASTIC_BEANSTALK_COOKBOOK.md) covers one EB Application, multiple EB Environments, and reusing the same Docker image.
+
 ## Prerequisites
 
 1. **AWS CLI installed and configured**
@@ -74,6 +76,11 @@ This will create all AWS resources from scratch:
 | `-DBPassword` | *(auto-generated)* | RDS master password (auto-generated if not provided) |
 | `-SecretKey` | *(auto-generated)* | JWT secret key (auto-generated if not provided) |
 | `-SkipBuild` | `$false` | Skip Docker build and push |
+| `-S3BucketName` | *(none)* | If set, app uses S3 for inputs, outputs, and archive (file upload, pipeline, and run archives all use this bucket) |
+| `-S3BasePrefix` | *(none)* | Optional key prefix for S3 paths (e.g. `loan-engine/test`) |
+| `-Profile` | *(none)* | AWS CLI profile (e.g. for IAM Identity Center) |
+
+**Using S3:** When you pass `-S3BucketName MyBucket`, the app expects that bucket to **already exist** in the same region. Create it first, e.g. `aws s3 mb s3://MyBucket --region us-east-1`. All file uploads, pipeline inputs/outputs, and run archives go to that bucket (under the prefixes implied by `S3_BASE_PREFIX` and area: inputs, outputs, archive).
 
 ## What Gets Created
 
@@ -217,6 +224,51 @@ http://<ALB_DNS_NAME>
 Default admin credentials (change after first login):
 - Username: `admin`
 - Password: `admin123`
+
+### Create application users
+
+Use `create-app-user.ps1` to add users via the admin API (no direct DB access needed). Run from repo root; replace `<ALB_URL>` with your app URL (e.g. `http://loan-engine-test-xxxxx.us-east-1.elb.amazonaws.com`).
+
+**List sales teams** (to get IDs for `sales_team` users):
+
+```powershell
+.\deploy\aws\create-app-user.ps1 `
+  -BaseUrl "http://<ALB_URL>" `
+  -AdminUsername "admin" `
+  -AdminPassword "admin123" `
+  -ListSalesTeams
+```
+
+**Create analyst or admin user:**
+
+```powershell
+.\deploy\aws\create-app-user.ps1 `
+  -BaseUrl "http://<ALB_URL>" `
+  -AdminUsername "admin" `
+  -AdminPassword "admin123" `
+  -Username "jdoe" `
+  -Email "jdoe@company.com" `
+  -Password "TempPass!123" `
+  -FullName "Jane Doe" `
+  -Role analyst
+```
+
+**Create sales team user** (requires `-SalesTeamId` from the list above):
+
+```powershell
+.\deploy\aws\create-app-user.ps1 `
+  -BaseUrl "http://<ALB_URL>" `
+  -AdminUsername "admin" `
+  -AdminPassword "admin123" `
+  -Username "steam1" `
+  -Email "steam1@company.com" `
+  -Password "TempPass!123" `
+  -FullName "Sales Team User" `
+  -Role sales_team `
+  -SalesTeamId 1
+```
+
+Valid `-Role` values: `admin`, `analyst`, `sales_team`.
 
 ## Updating the Application
 
