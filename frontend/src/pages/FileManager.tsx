@@ -8,10 +8,10 @@ interface FileInfo {
   last_modified: string | null
 }
 
-const S3_DEFAULT_UPLOAD_PATH = 'input/input/files_required/'
+const S3_DEFAULT_UPLOAD_PATH = 'input/files_required/'
 
 export default function FileManager() {
-  const area = 'inputs'
+  const [area, setArea] = useState<'inputs' | 'outputs'>('inputs')
   const [currentPath, setCurrentPath] = useState('')
   const [files, setFiles] = useState<FileInfo[]>([])
   const [loading, setLoading] = useState(false)
@@ -19,12 +19,25 @@ export default function FileManager() {
   const [dragActive, setDragActive] = useState(false)
 
   useEffect(() => {
-    axios.get('/api/config').then((r) => {
-      if ((r.data?.storage_type ?? 'local') === 's3') {
-        setCurrentPath(S3_DEFAULT_UPLOAD_PATH)
-      }
-    }).catch(() => {})
-  }, [])
+    axios
+      .get('/api/config')
+      .then((r) => {
+        if ((r.data?.storage_type ?? 'local') === 's3') {
+          // For S3 inputs, default to input/files_required/ so uploads go where the pipeline reads.
+          if (area === 'inputs') {
+            setCurrentPath(S3_DEFAULT_UPLOAD_PATH)
+          }
+        }
+      })
+      .catch(() => {})
+  }, [area])
+
+  // When switching between inputs/outputs, start at the root of that area
+  useEffect(() => {
+    if (area === 'outputs') {
+      setCurrentPath('') // outputs root; user can navigate into runs/
+    }
+  }, [area])
 
   useEffect(() => {
     loadFiles()
@@ -166,7 +179,18 @@ export default function FileManager() {
     <div className="px-4 py-6 sm:px-0">
       <div className="flex justify-between items-center mb-6">
         <h1 className="text-2xl font-bold text-gray-900">File Manager</h1>
-        <div className="flex gap-2">
+        <div className="flex items-center gap-3">
+          <div className="flex items-center gap-1">
+            <span className="text-sm text-gray-600">Area:</span>
+            <select
+              value={area}
+              onChange={(e) => setArea(e.target.value as 'inputs' | 'outputs')}
+              className="border border-gray-300 rounded-md px-2 py-1 text-sm"
+            >
+              <option value="inputs">Inputs</option>
+              <option value="outputs">Outputs</option>
+            </select>
+          </div>
           {currentPath && (
             <button
               onClick={goUp}
@@ -190,9 +214,15 @@ export default function FileManager() {
         <div className="text-sm text-gray-600">
           <span className="font-medium">Current Path:</span> {currentPath || '/'}
         </div>
-        <div className="text-xs text-gray-500 mt-1">
-          Input area — files drop into &quot;input/input/files_required/&quot;. Pipeline reads from there. Keep this path when uploading.
-        </div>
+        {area === 'inputs' ? (
+          <div className="text-xs text-gray-500 mt-1">
+            Input area — files go to input/files_required/ (S3: bucket/input/input/files_required/). Pipeline reads from there.
+          </div>
+        ) : (
+          <div className="text-xs text-gray-500 mt-1">
+            Outputs area — for S3, per-run outputs live under runs/ (S3: bucket/outputs/runs/{'{run_id}'}).
+          </div>
+        )}
       </div>
 
       {/* Upload Area */}

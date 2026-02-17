@@ -109,7 +109,7 @@ export default function Dashboard() {
         <h2 className="text-lg font-medium text-gray-900 mb-2">Start pipeline run</h2>
         <p className="text-sm text-gray-500 mb-3">
           {storageType === 's3'
-            ? 'Run reads from input/input/files_required/ on S3. File Manager opens there by default — upload or drop files in that path.'
+            ? 'Run reads from s3://bucket/input/input/files_required/. File Manager opens at input/files_required/ by default.'
             : 'Local path to the input folder containing files_required/.'}
         </p>
         <div className="flex flex-wrap items-center gap-3">

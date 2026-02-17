@@ -159,10 +159,10 @@ async def create_pipeline_run(
             input_prefix=prev_run.input_file_path,
         )
     
-    # When using S3, run reads from inputs/input/input/ (prefix "input/input"); temp dir gets files_required/ at top level.
+    # When using S3, run reads from bucket/input/input/files_required/ (inputs area = bucket/input/, prefix "input").
     temp_dir = None
     if settings.STORAGE_TYPE == "s3":
-        s3_prefix = "input/input"
+        s3_prefix = "input"  # under inputs area (bucket/input/) -> bucket/input/input/files_required/
         try:
             input_storage = get_storage_backend(area="inputs")
             temp_dir = sync_s3_input_to_temp(input_storage, s3_prefix)
@@ -171,9 +171,8 @@ async def create_pipeline_run(
             raise HTTPException(
                 status_code=400,
                 detail=(
-                    "No files found in 'input/input/files_required/'. "
-                    "In File Manager, upload to path 'input/input/files_required' (files go there by default). "
-                    "Then start the pipeline run again."
+                    "No files found in input/input/files_required/ (s3://bucket/input/input/files_required/). "
+                    "Upload files in File Manager to path 'input/files_required' (default). Then start the run again."
                 ),
             ) from e
         except Exception as e:

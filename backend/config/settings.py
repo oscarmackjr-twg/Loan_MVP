@@ -1,8 +1,10 @@
 """Application configuration and settings."""
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import model_validator
 from typing import Optional
 import os
 from pathlib import Path
+from urllib.parse import quote_plus
 
 
 class Settings(BaseSettings):
@@ -18,9 +20,33 @@ class Settings(BaseSettings):
         env_ignore_empty=True,
         extra="ignore",
     )
-    
-    # Database
-    DATABASE_URL: str = "postgresql://postgres:postgres@localhost:5432/loan_engine"
+
+    # Database: support either full DATABASE_URL or individual env vars (for Elastic Beanstalk, etc.)
+    DATABASE_URL: Optional[str] = None
+    DATABASE_HOST: str = "localhost"
+    DATABASE_PORT: str = "5432"
+    DATABASE_NAME: str = "loan_engine"
+    DATABASE_USER: str = "postgres"
+    DATABASE_PASSWORD: str = ""
+    DATABASE_SSLMODE: Optional[str] = None  # e.g. "require" for RDS
+
+    @model_validator(mode="after")
+    def build_database_url(self) -> "Settings":
+        if self.DATABASE_URL and self.DATABASE_URL.strip():
+            return self
+        # Build from components so EB/containers can set DATABASE_HOST, DATABASE_USER, etc.
+        user = quote_plus(self.DATABASE_USER)
+        password = quote_plus(self.DATABASE_PASSWORD) if self.DATABASE_PASSWORD else ""
+        host = self.DATABASE_HOST
+        port = self.DATABASE_PORT
+        name = self.DATABASE_NAME
+        if password:
+            self.DATABASE_URL = f"postgresql://{user}:{password}@{host}:{port}/{name}"
+        else:
+            self.DATABASE_URL = f"postgresql://{user}@{host}:{port}/{name}"
+        if self.DATABASE_SSLMODE:
+            self.DATABASE_URL = f"{self.DATABASE_URL}?sslmode={self.DATABASE_SSLMODE}"
+        return self
     
     # Security
     SECRET_KEY: str = "your-secret-key-change-in-production"
@@ -40,6 +66,7 @@ class Settings(BaseSettings):
     S3_ACCESS_KEY_ID: Optional[str] = None
     S3_SECRET_ACCESS_KEY: Optional[str] = None
     S3_BASE_PREFIX: Optional[str] = None  # Optional prefix for all S3 paths (e.g., "test/" or "prod/")
+    S3_INPUTS_PREFIX: str = "input"  # S3 key prefix for inputs area; use "input" to match s3://bucket/input/...
     
     # Pipeline
     IRR_TARGET: float = 8.05

@@ -60,10 +60,10 @@ async def upload_file(
             effective_area = "inputs"
         storage = get_storage_backend(storage_type=storage_type, area=effective_area)
         
-        # When S3, default path so files drop into input/input/files_required/
+        # When S3, default path so files drop into bucket/input/input/files_required/ (path "input/files_required/" under inputs area)
         effective_path = (path or "").strip()
         if (storage_type or settings.STORAGE_TYPE) == "s3" and not effective_path:
-            effective_path = "input/input/files_required/"
+            effective_path = "input/files_required/"
         
         # Determine destination path
         if effective_path and not effective_path.endswith("/"):
