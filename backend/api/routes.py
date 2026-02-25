@@ -45,6 +45,8 @@ class RunResponse(BaseModel):
     run_id: str
     status: str
     sales_team_id: Optional[int]
+    created_by_id: Optional[int] = None
+    created_by_username: Optional[str] = None
     total_loans: int
     total_balance: float
     exceptions_count: int

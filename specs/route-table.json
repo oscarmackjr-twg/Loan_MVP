@@ -1,0 +1,34 @@
+[
+  {
+    "path": "dashboard",
+    "component": "Dashboard"
+  },
+  {
+    "path": "exceptions",
+    "component": "Exceptions"
+  },
+  {
+    "path": "files",
+    "component": "FileManager"
+  },
+  {
+    "path": "rejected-loans",
+    "component": "RejectedLoans"
+  },
+  {
+    "path": "runs",
+    "component": "Runs"
+  },
+  {
+    "path": "/ (index)",
+    "component": "Navigate"
+  },
+  {
+    "path": "/login",
+    "component": "Login"
+  },
+  {
+    "path": "runs/:runId",
+    "component": "RunDetail"
+  }
+]

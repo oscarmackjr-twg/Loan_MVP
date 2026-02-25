@@ -1,0 +1,59 @@
+# Deploy Loan Engine to AWS Test (ECS Fargate)
+# Trigger: push to main (or set branch in workflow_dispatch)
+# Secrets: AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY (or use OIDC)
+# Repo vars or secrets: ECR_REPO_URI, ECS_CLUSTER, ECS_SERVICE, AWS_REGION
+
+name: Deploy to AWS Test
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+  ECR_REPO_NAME: loan-engine
+  ECS_CLUSTER: ${{ vars.ECS_CLUSTER || 'test-cluster' }}
+  ECS_SERVICE: ${{ vars.ECS_SERVICE || 'loan-engine-test' }}
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push image
+        id: build
+        env:
+          ECR_REGISTRY: ${{ steps.ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          docker build -f deploy/Dockerfile -t $ECR_REGISTRY/$ECR_REPO_NAME:$IMAGE_TAG -t $ECR_REGISTRY/$ECR_REPO_NAME:latest .
+          docker push $ECR_REGISTRY/$ECR_REPO_NAME:$IMAGE_TAG
+          docker push $ECR_REGISTRY/$ECR_REPO_NAME:latest
+          echo "image=$ECR_REGISTRY/$ECR_REPO_NAME:$IMAGE_TAG" >> $GITHUB_OUTPUT
+
+      - name: Deploy to ECS
+        run: |
+          aws ecs update-service \
+            --cluster ${{ env.ECS_CLUSTER }} \
+            --service ${{ env.ECS_SERVICE }} \
+            --force-new-deployment \
+            --region ${{ env.AWS_REGION }}
+
+      - name: Deployment summary
+        run: |
+          echo "Image: ${{ steps.build.outputs.image }}"
+          echo "ECS: ${{ env.ECS_CLUSTER }} / ${{ env.ECS_SERVICE }}"

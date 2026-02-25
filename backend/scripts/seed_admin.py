@@ -92,6 +92,51 @@ def create_admin_user(
         db.close()
 
 
+def create_user_if_missing(
+    username: str,
+    password: str,
+    email: str,
+    full_name: str,
+    role: UserRole = UserRole.ANALYST,
+):
+    pwd_bytes = password.encode("utf-8")
+    if len(pwd_bytes) > BCRYPT_MAX_PASSWORD_BYTES:
+        raise ValueError(
+            f"Password is too long ({len(pwd_bytes)} bytes). "
+            f"Bcrypt allows at most {BCRYPT_MAX_PASSWORD_BYTES} bytes."
+        )
+
+    db: Session = SessionLocal()
+    try:
+        existing = db.query(User).filter(
+            (User.username == username) | (User.email == email)
+        ).first()
+
+        if existing:
+            print(f"User already exists: {existing.username} ({existing.email})")
+            return existing
+
+        user = User(
+            email=email,
+            username=username,
+            hashed_password=get_password_hash(password),
+            full_name=full_name,
+            role=role,
+            is_active=True,
+        )
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+        print(f"✅ User created: {username} ({email}) [role={role.value}]")
+        return user
+    except Exception as e:
+        db.rollback()
+        print(f"❌ Error creating user {username}: {e}")
+        raise
+    finally:
+        db.close()
+
+
 def _print_permission_help():
     """Print guidance when database permission errors occur."""
     print("\n" + "=" * 60)
@@ -116,17 +161,39 @@ def _print_permission_help():
 if __name__ == "__main__":
     import argparse
     
-    parser = argparse.ArgumentParser(description="Create initial admin user")
+    parser = argparse.ArgumentParser(description="Create initial admin user and default team users")
     parser.add_argument("--username", default="admin", help="Admin username")
     parser.add_argument("--password", default="admin123", help="Admin password")
     parser.add_argument("--email", default="admin@example.com", help="Admin email")
     parser.add_argument("--full-name", default="Administrator", help="Admin full name")
     
     args = parser.parse_args()
-    
-    create_admin_user(
+
+    admin = create_admin_user(
         username=args.username,
         password=args.password,
         email=args.email,
         full_name=args.full_name
     )
+
+    # Seed additional default users with initial password twg123
+    default_password = "twg123"
+    additional_users = [
+        ("nparakh", "nparakh@example.com", "nparakh"),
+        ("jbalaji", "jbalaji@example.com", "jbalaji"),
+        ("gdehankar", "gdehankar@example.com", "gdehankar"),
+        ("hkhandelwal", "hkhandelwal@example.com", "hkhandelwal"),
+    ]
+
+    for username, email, full_name in additional_users:
+        try:
+            create_user_if_missing(
+                username=username,
+                password=default_password,
+                email=email,
+                full_name=full_name,
+                role=UserRole.ANALYST,
+            )
+        except Exception:
+            # Errors are printed inside create_user_if_missing; continue with others
+            continue

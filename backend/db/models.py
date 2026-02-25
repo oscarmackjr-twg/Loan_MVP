@@ -104,6 +104,11 @@ class PipelineRun(Base):
     created_by_user = relationship("User", back_populates="runs")
     exceptions = relationship("LoanException", back_populates="run")
 
+    @property
+    def created_by_username(self) -> str | None:
+        """Convenience property for API responses: username of user who started the run."""
+        return self.created_by_user.username if self.created_by_user else None
+
 
 class LoanException(Base):
     """Loan-level exceptions and validations."""

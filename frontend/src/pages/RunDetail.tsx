@@ -13,6 +13,7 @@ interface RunDetail {
   started_at: string | null
   completed_at: string | null
   run_weekday_name?: string | null
+  created_by_username?: string | null
 }
 
 interface Summary {
@@ -207,6 +208,12 @@ export default function RunDetail() {
               >
                 {run.status}
               </span>
+            </dd>
+          </div>
+          <div>
+            <dt className="text-sm font-medium text-gray-500">Started by</dt>
+            <dd className="mt-1 text-sm text-gray-900">
+              {run.created_by_username || '—'}
             </dd>
           </div>
           <div>
