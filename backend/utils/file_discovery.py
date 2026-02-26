@@ -157,7 +157,8 @@ def discover_input_files(
     directory: str,
     yesterday: str,
     sfy_date: Optional[str] = None,
-    prime_date: Optional[str] = None
+    prime_date: Optional[str] = None,
+    last_end: Optional[str] = None,
 ) -> dict:
     """
     Discover all input files needed for pipeline execution.
@@ -180,7 +181,8 @@ def discover_input_files(
     files['prime_file'] = find_prime_file(directory, prime_date, required=True)
     
     # Optional FX files
-    last_end = calculate_last_month_end()
+    if last_end is None:
+        last_end = calculate_last_month_end()
     files['fx3_file'] = find_fx_file(directory, last_end, fx_number=3, required=False)
     files['fx4_file'] = find_fx_file(directory, last_end, fx_number=4, required=False)
     

@@ -38,12 +38,14 @@ def _collect_input_paths(folder: str, pdate: Optional[str]) -> List[Path]:
 
     # Discovered input files (loans, sfy, prime, optional fx3/fx4)
     try:
-        pdate_val, yesterday, _ = calculate_pipeline_dates(pdate)
+        # Use pdate as an override when provided; Tday/base date falls back to system today.
+        pdate_val, yesterday, last_end = calculate_pipeline_dates(pdate)
         file_paths = discover_input_files(
             directory=folder,
             yesterday=yesterday,
             sfy_date=None,
             prime_date=None,
+            last_end=last_end,
         )
         for key in ("loans", "sfy_file", "prime_file", "fx3_file", "fx4_file"):
             fp = file_paths.get(key)
@@ -95,12 +97,16 @@ def _copy_outputs_to_archive(
     archive_storage.create_directory(prefix)
     count = 0
 
-    # Exception reports and share reports (stored in output_storage at output_prefix)
+    # Exception reports and notebook-style outputs (stored in output_storage at output_prefix)
     report_keys = [
         "purchase_price_mismatch",
         "flagged_loans",
         "notes_flagged_loans",
         "comap_not_passed",
+        "special_asset_prime",
+        "special_asset_sfy",
+        "eligibility_checks_json",
+        "eligibility_checks_summary",
     ]
     for key in report_keys:
         path = reports.get(key)

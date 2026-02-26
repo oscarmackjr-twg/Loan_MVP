@@ -20,20 +20,36 @@ from orchestration.s3_input_sync import sync_s3_input_to_temp, remove_temp_input
 from orchestration.archive_run import archive_previous_run
 from config.settings import settings
 from storage import get_storage_backend
+from utils.holiday_calendar import (
+    get_supported_countries,
+    get_holidays_list,
+    is_business_day,
+    PDATE_COUNTRY,
+)
+from utils.date_utils import calculate_next_tuesday, calculate_pipeline_dates
 
 router = APIRouter(prefix="/api", tags=["api"])
 
+# All notebook-style outputs (mirror February_Baseline + eligibility). Keys must match report keys from pipeline.
 NOTEBOOK_OUTPUT_DEFS = [
     {"key": "flagged_loans", "filename": "flagged_loans.xlsx", "label": "Flagged loans"},
     {"key": "purchase_price_mismatch", "filename": "purchase_price_mismatch.xlsx", "label": "Purchase price mismatch"},
     {"key": "comap_not_passed", "filename": "comap_not_passed.xlsx", "label": "CoMAP not passed"},
     {"key": "notes_flagged_loans", "filename": "notes_flagged_loans.xlsx", "label": "Notes flagged loans"},
+    {"key": "special_asset_prime", "filename": "special_asset_prime.xlsx", "label": "Special asset (Prime)"},
+    {"key": "special_asset_sfy", "filename": "special_asset_sfy.xlsx", "label": "Special asset (SFY)"},
+    {"key": "eligibility_checks_json", "filename": "eligibility_checks.json", "label": "Eligibility checks (JSON)"},
+    {"key": "eligibility_checks_summary", "filename": "eligibility_checks_summary.xlsx", "label": "Eligibility checks summary"},
 ]
 
 
 class RunCreate(BaseModel):
     """Pipeline run creation model."""
+    # Purchase date (YYYY-MM-DD). If omitted, defaults to next Tuesday (US business day; if that Tuesday is a US holiday, the following business day).
     pdate: Optional[str] = None
+    # Base "today" date (YYYY-MM-DD) used for file naming (yesterday, last month end).
+    # Defaults to the current system date when omitted.
+    tday: Optional[str] = None
     irr_target: float = 8.05
     # Local: filesystem path to input folder. S3 (AWS): key prefix under inputs area (e.g. "legacy", "sales_team_1").
     folder: str = "C:/Users/omack/Intrepid/pythonFramework/loan_engine/legacy"
@@ -122,6 +138,51 @@ async def get_config(current_user: User = Depends(get_current_user)):
     return out
 
 
+# ---------- Business holiday calendar (US, India, England, Singapore); used for pdate ----------
+@router.get("/calendar/countries")
+async def list_calendar_countries(current_user: User = Depends(get_current_user)):
+    """List supported holiday calendar countries (US, IN, GB, SG) for the next 10 years."""
+    return get_supported_countries()
+
+
+@router.get("/calendar/holidays")
+async def list_holidays(
+    country: str = Query(..., description="Country code: US, IN, GB, SG"),
+    year: Optional[int] = Query(None, description="Year (default: current through +10)"),
+    year_end: Optional[int] = Query(None, description="End year for range (use with year)"),
+    current_user: User = Depends(get_current_user),
+):
+    """List holidays for a country. Covers current year through current + 10 years."""
+    supported = get_supported_countries()
+    if country not in supported:
+        raise HTTPException(status_code=400, detail=f"Unsupported country. Use one of: {list(supported.keys())}")
+    return get_holidays_list(country, year=year, year_end=year_end)
+
+
+@router.get("/calendar/next-posting-date")
+async def get_next_posting_date(
+    tday: Optional[str] = Query(None, description="Base date YYYY-MM-DD (default: today)"),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Return the next posting date (pdate). Next Tuesday that is a US business day,
+    or the following business day if that Tuesday is a US holiday.
+    """
+    base = None
+    if tday:
+        try:
+            base = datetime.strptime(tday, "%Y-%m-%d")
+        except ValueError:
+            raise HTTPException(status_code=400, detail="tday must be YYYY-MM-DD")
+    pdate = calculate_next_tuesday(base_date=base)
+    pdate_dt = datetime.strptime(pdate, "%Y-%m-%d").date()
+    return {
+        "pdate": pdate,
+        "is_us_business_day": is_business_day(pdate_dt, country=PDATE_COUNTRY),
+        "country_used": PDATE_COUNTRY,
+    }
+
+
 @router.post("/pipeline/run", response_model=RunResponse)
 async def create_pipeline_run(
     run_data: RunCreate,
@@ -137,7 +198,8 @@ async def create_pipeline_run(
         sales_team_id=sales_team_id,
         created_by_id=current_user.id,
         pdate=run_data.pdate,
-        irr_target=run_data.irr_target
+        irr_target=run_data.irr_target,
+        tday=run_data.tday,
     )
     
     # Add sales team ID to file paths for isolation.
@@ -300,6 +362,15 @@ async def list_notebook_outputs(
     return {"run_id": run_id, "prefix": prefix, "outputs": outputs}
 
 
+def _media_type_for_filename(filename: str) -> str:
+    """Return media type for notebook output download."""
+    if filename.endswith(".json"):
+        return "application/json"
+    if filename.endswith(".xlsx"):
+        return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    return "application/octet-stream"
+
+
 @router.get("/runs/{run_id}/notebook-outputs/{output_key}/download")
 async def download_notebook_output(
     run_id: str,
@@ -307,7 +378,7 @@ async def download_notebook_output(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Download one of the 4 notebook-replacement output files for a run."""
+    """Download one of the notebook-replacement output files for a run (Excel or JSON)."""
     query = db.query(PipelineRun).filter(PipelineRun.run_id == run_id)
     query = filter_by_sales_team(query, current_user)
     run = query.first()
@@ -329,7 +400,7 @@ async def download_notebook_output(
     content = storage.read_file(path)
     return StreamingResponse(
         io.BytesIO(content),
-        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        media_type=_media_type_for_filename(match["filename"]),
         headers={"Content-Disposition": f'attachment; filename="{match["filename"]}"'},
     )
 

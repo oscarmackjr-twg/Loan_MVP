@@ -50,17 +50,16 @@ def export_exception_reports(
     *,
     storage: StorageBackend,
     share_storage: StorageBackend,
+    special_asset_prime: Optional[pd.DataFrame] = None,
+    special_asset_sfy: Optional[pd.DataFrame] = None,
 ) -> dict:
     """
-    Export notebook-replacement exception reports.
+    Export notebook-replacement exception reports and special-asset outputs.
 
-    Writes the 4 key outputs:
-    - flagged_loans.xlsx
-    - purchase_price_mismatch.xlsx
-    - comap_not_passed.xlsx
-    - notes_flagged_loans.xlsx
-
-    to both the internal outputs area and (optionally) a share outputs area.
+    Writes:
+    - flagged_loans.xlsx, purchase_price_mismatch.xlsx, comap_not_passed.xlsx, notes_flagged_loans.xlsx
+    - to both internal outputs and share (share = first 30 columns).
+    - special_asset_prime.xlsx, special_asset_sfy.xlsx to internal outputs only (when non-empty).
     """
     reports = {}
     
@@ -105,5 +104,15 @@ def export_exception_reports(
         comap_share_path = f"{output_share_prefix}/comap_not_passed.xlsx"
         share_storage.write_file(comap_share_path, export_to_excel_bytes(comap_failed, max_cols=30))
         reports["comap_not_passed_share"] = comap_share_path
+    
+    # Special asset outputs (notebook: special_asset_prime.xlsx; mirror for SFY)
+    if special_asset_prime is not None and not special_asset_prime.empty:
+        path = f"{output_prefix}/special_asset_prime.xlsx"
+        storage.write_file(path, export_to_excel_bytes(special_asset_prime))
+        reports["special_asset_prime"] = path
+    if special_asset_sfy is not None and not special_asset_sfy.empty:
+        path = f"{output_prefix}/special_asset_sfy.xlsx"
+        storage.write_file(path, export_to_excel_bytes(special_asset_sfy))
+        reports["special_asset_sfy"] = path
     
     return reports

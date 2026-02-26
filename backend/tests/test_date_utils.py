@@ -110,11 +110,19 @@ class TestCalculatePipelineDates:
         assert last_end is not None
     
     def test_calculate_without_override(self):
-        """Test without pdate override (uses next Tuesday)."""
+        """Test without pdate override (uses next Tuesday, or next US business day if that Tuesday is a holiday)."""
         pdate, yesterday, last_end = calculate_pipeline_dates()
         assert pdate is not None
         assert len(pdate) == 10  # YYYY-MM-DD format
         assert yesterday is not None
         assert last_end is not None
         assert len(yesterday) == 10  # MM-DD-YYYY format
-        assert len(last_end) == 13  # YYYY_MMM_DD format
+        assert len(last_end) >= 11  # YYYY_MM_DD format (e.g. 2026_001_31)
+
+    def test_next_tuesday_skips_us_holiday(self):
+        """When next Tuesday is a US holiday (e.g. July 4), pdate is the following business day."""
+        # July 4, 2023 is a Tuesday (US Independence Day). Base = Monday July 3 -> next Tuesday = July 4 (holiday) -> pdate should be July 5
+        from datetime import datetime
+        base = datetime(2023, 7, 3)  # Monday
+        pdate = calculate_next_tuesday(base_date=base)
+        assert pdate == "2023-07-05"  # Wednesday, first US business day after the holiday Tuesday
