@@ -112,3 +112,6 @@ Desktop.ini
 # Project specific
 setenv.bat
 cd
+
+# AWS / EC2 private keys (never commit)
+*.pem
