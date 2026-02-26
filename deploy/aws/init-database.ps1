@@ -19,6 +19,9 @@ param(
     [switch]$SeedOnly = $false,  # If set, run only seed_admin.py (skip init_db). Use when tables exist and you only need to create/update admin.
     
     [Parameter(Mandatory=$false)]
+    [switch]$DropExisting = $false,  # If set, drop all tables and recreate (WARNING: wipes all run data, users, etc.). Use with init (not SeedOnly). For ecs-task, passes --drop-existing --yes.
+    
+    [Parameter(Mandatory=$false)]
     [string]$Profile = ""  # AWS CLI profile (e.g. for IAM Identity Center)
 )
 
@@ -123,8 +126,13 @@ if ($Method -eq "local") {
     try {
         if (-not $SeedOnly) {
             # Initialize database schema (run via cmd so Python stderr/tracebacks don't cause PowerShell to throw)
+            if ($DropExisting) {
+                Write-Warning "DropExisting is set: all tables will be dropped and recreated (all run data and users will be deleted)."
+            }
             Write-Info "Creating database tables..."
-            $initOut = cmd /c "python scripts/init_db.py 2>&1" 2>&1 | Out-String
+            $initArgs = "python scripts/init_db.py"
+            if ($DropExisting) { $initArgs += " --drop-existing --yes" }
+            $initOut = cmd /c "$initArgs 2>&1" 2>&1 | Out-String
             if ($LASTEXITCODE -ne 0) {
                 Write-Error "Database initialization failed"
                 if ($initOut) {
@@ -160,6 +168,9 @@ if ($Method -eq "local") {
         Write-Success "Admin user created"
         
         Write-Success "Database initialization complete!"
+        if ($DropExisting) {
+            Write-Info "All previous run data was wiped. Hard refresh the dashboard (Ctrl+F5) to see an empty runs list."
+        }
         Write-Info "Default credentials:"
         Write-Info "  Username: admin"
         Write-Info "  Password: admin123"
@@ -211,6 +222,9 @@ if ($Method -eq "local") {
     
 } elseif ($Method -eq "ecs-task") {
     Write-Info "Initializing database via one-off ECS task (no Session Manager plugin required)..."
+    if ($DropExisting -and -not $SeedOnly) {
+        Write-Warning "DropExisting is set: all tables will be dropped and recreated (all run data and users will be deleted)."
+    }
     
     $ClusterName = "$AppName-$Environment"
     $ServiceName = "$AppName-$Environment"
@@ -256,7 +270,9 @@ if ($Method -eq "local") {
     
     # Override container command. file:// on Windows fails with [Errno 22], so run aws via cmd with
     # JSON passed inline (quotes escaped for cmd; && escaped so cmd does not interpret it).
-    $cmdScript = if ($SeedOnly) { "python scripts/seed_admin.py" } else { "python scripts/init_db.py && python scripts/seed_admin.py" }
+    $initCmd = "python scripts/init_db.py"
+    if ($DropExisting -and -not $SeedOnly) { $initCmd += " --drop-existing --yes" }
+    $cmdScript = if ($SeedOnly) { "python scripts/seed_admin.py" } else { "$initCmd && python scripts/seed_admin.py" }
     $cmdJson = $cmdScript -replace '\\', '\\\\' -replace '"', '\"'
     $overrides = "{`"containerOverrides`":[{`"name`":`"app`",`"command`":[`"/bin/sh`",`"-c`",`"$cmdJson`"]}]}"
     $overridesForCmd = $overrides -replace '"', '\"' -replace '&', '^&'
@@ -332,6 +348,9 @@ if ($Method -eq "local") {
     }
     
     Write-Success "Database initialization complete!"
+    if ($DropExisting -and -not $SeedOnly) {
+        Write-Info "All previous run data on RDS was wiped. Do a hard refresh on the dashboard (Ctrl+F5) to see an empty runs list."
+    }
     
 } else {
     Write-Error "Invalid method: $Method. Use 'local', 'ecs', or 'ecs-task'"

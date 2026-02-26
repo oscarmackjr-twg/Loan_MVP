@@ -6,6 +6,7 @@ interface Run {
   id: number
   run_id: string
   status: string
+  created_by_username?: string | null
   total_loans: number
   total_balance: number
   exceptions_count: number
@@ -74,6 +75,9 @@ export default function Runs() {
                 Run ID
               </th>
               <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                Started By
+              </th>
+              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                 Status
               </th>
               <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
@@ -98,6 +102,9 @@ export default function Runs() {
               <tr key={run.run_id}>
                 <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">
                   {run.run_id}
+                </td>
+                <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                  {run.created_by_username || '—'}
                 </td>
                 <td className="px-6 py-4 whitespace-nowrap">
                   <span

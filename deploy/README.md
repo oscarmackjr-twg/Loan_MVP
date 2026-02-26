@@ -2,7 +2,8 @@
 
 - **Dockerfile** – Multi-stage build (frontend + backend); run from repo root: `docker build -f deploy/Dockerfile .`
 - **docker-compose.yml** – Local/test run with Postgres: `docker compose -f deploy/docker-compose.yml up -d` (from repo root)
-- **aws/** – ECS task definition, env example, and scripts for ECR build/push and ECS update
+- **aws/** – **Development** deployment: PowerShell scripts for ECS/Fargate, RDS, ALB, ECR (e.g. `deploy-aws.ps1`).
+- **terraform/qa/** – **QA** deployment: Terraform for S3 `loan-engine-qa`, RDS `loan-engine-qa`, ECS cluster/service `loan-engine-qa`, and ECR `loan-engine-qa`. See `terraform/qa/README.md` and `deploy-qa.ps1`.
 - **CI/CD** – `.github/workflows/deploy-test.yml` builds and deploys to AWS test on push to `main`
 
 See **`docs/AWS_DEPLOYMENT_PLAN.md`** and **`docs/DEPLOYMENT_COOKBOOK.md`** for the full deployment plan and step-by-step checklist.

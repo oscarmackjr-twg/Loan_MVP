@@ -58,6 +58,10 @@ def enrich_buy_df(
             how='left'
         )
     
+    # Ensure new_programs exists (from MASTER_SHEET; notebook uses for special_asset_prime/sfy)
+    if 'new_programs' not in df.columns:
+        df['new_programs'] = False
+    
     # Add metadata
     df['Repurchase'] = False
     df['Repurchase_Date'] = None

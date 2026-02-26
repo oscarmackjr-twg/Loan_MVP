@@ -14,6 +14,11 @@ interface RunSummary {
 export default function Dashboard() {
   const [runs, setRuns] = useState<RunSummary[]>([])
   const [loading, setLoading] = useState(true)
+  const [storageType, setStorageType] = useState<string>('local')
+  const [runFolder, setRunFolder] = useState('')
+  const [runAcceptedDialogOpen, setRunAcceptedDialogOpen] = useState(false)
+  const [startedRunId, setStartedRunId] = useState<string | null>(null)
+  const [runSubmitting, setRunSubmitting] = useState(false)
   const [stats, setStats] = useState({
     totalRuns: 0,
     completedRuns: 0,
@@ -23,6 +28,14 @@ export default function Dashboard() {
 
   useEffect(() => {
     fetchRuns()
+    axios.get('/api/config').then((r) => {
+      const st = r.data?.storage_type ?? 'local'
+      setStorageType(st)
+      if (st === 'local') {
+        setRunFolder('C:/Users/omack/Intrepid/pythonFramework/loan_engine/legacy')
+      }
+      // S3: no folder field used; run always reads from root of input directory
+    }).catch(() => {})
   }, [])
 
   const fetchRuns = async () => {
@@ -54,11 +67,13 @@ export default function Dashboard() {
         return
       }
 
-      await axios.post('/api/pipeline/run', {
-        folder: 'C:/Users/omack/Intrepid/pythonFramework/loan_engine/legacy',
+      setRunSubmitting(true)
+      const response = await axios.post('/api/pipeline/run', {
+        folder: storageType === 's3' ? '' : runFolder.trim(), // S3: no prefix, always root of input dir; local: path
       })
-      alert('Pipeline run started!')
-      setTimeout(fetchRuns, 2000)
+      setStartedRunId(response.data?.run_id ?? null)
+      setRunAcceptedDialogOpen(true)
+      setTimeout(fetchRuns, 1500)
     } catch (error: any) {
       const errorMessage = error.response?.data?.detail || error.message
       console.error('Pipeline run error:', error)
@@ -69,7 +84,15 @@ export default function Dashboard() {
       } else {
         alert(`Failed to start pipeline: ${errorMessage}`)
       }
+    } finally {
+      setRunSubmitting(false)
     }
+  }
+
+  const closeRunAcceptedDialog = () => {
+    setRunAcceptedDialogOpen(false)
+    setStartedRunId(null)
+    fetchRuns()
   }
 
   if (loading) {
@@ -80,13 +103,61 @@ export default function Dashboard() {
     <div className="px-4 py-6 sm:px-0">
       <div className="flex justify-between items-center mb-6">
         <h1 className="text-2xl font-bold text-gray-900">Dashboard</h1>
-        <button
-          onClick={triggerRun}
-          className="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700"
-        >
-          Start Pipeline Run
-        </button>
       </div>
+
+      <div className="bg-white shadow rounded-lg p-4 mb-6">
+        <h2 className="text-lg font-medium text-gray-900 mb-2">Start pipeline run</h2>
+        <p className="text-sm text-gray-500 mb-3">
+          {storageType === 's3'
+            ? 'Run reads from s3://bucket/input/input/files_required/. File Manager opens at input/files_required/ by default.'
+            : 'Local path to the input folder containing files_required/.'}
+        </p>
+        <div className="flex flex-wrap items-center gap-3">
+          {storageType === 's3' ? null : (
+            <input
+              type="text"
+              value={runFolder}
+              onChange={(e) => setRunFolder(e.target.value)}
+              placeholder="C:/path/to/input/folder"
+              className="flex-1 min-w-[200px] rounded-md border border-gray-300 px-3 py-2 text-sm shadow-sm focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
+            />
+          )}
+          <button
+            onClick={triggerRun}
+            disabled={runSubmitting}
+            className="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            {runSubmitting ? 'Starting…' : 'Start Pipeline Run'}
+          </button>
+        </div>
+      </div>
+
+      {/* Dialog: command accepted, run in progress */}
+      {runAcceptedDialogOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50" role="dialog" aria-modal="true" aria-labelledby="run-accepted-title">
+          <div className="bg-white rounded-lg shadow-xl max-w-md w-full p-6">
+            <h2 id="run-accepted-title" className="text-lg font-semibold text-gray-900 mb-2">
+              Command accepted
+            </h2>
+            <p className="text-gray-600 mb-4">
+              The pipeline run has been accepted and is in progress. You can track it in the Recent Runs table below or open the run for details.
+            </p>
+            {startedRunId && (
+              <p className="text-sm text-gray-500 mb-4 font-mono">
+                Run ID: {startedRunId}
+              </p>
+            )}
+            <div className="flex justify-end">
+              <button
+                onClick={closeRunAcceptedDialog}
+                className="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700"
+              >
+                OK
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
         <div className="bg-white overflow-hidden shadow rounded-lg">

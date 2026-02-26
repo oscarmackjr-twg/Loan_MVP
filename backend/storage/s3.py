@@ -76,11 +76,20 @@ class S3StorageBackend(StorageBackend):
     def write_file(self, path: str, content: bytes) -> None:
         """Write bytes to a file."""
         key = self._normalize_path(path)
-        self.s3_client.put_object(
-            Bucket=self.bucket_name,
-            Key=key,
-            Body=content
-        )
+        try:
+            self.s3_client.put_object(
+                Bucket=self.bucket_name,
+                Key=key,
+                Body=content
+            )
+        except ClientError as e:
+            error_code = e.response.get("Error", {}).get("Code", "")
+            if error_code == "NoSuchBucket":
+                raise ValueError(
+                    f"S3 bucket '{self.bucket_name}' does not exist (region: {self.region}). "
+                    "Create the bucket in AWS S3 or set S3_BUCKET_NAME to an existing bucket."
+                ) from e
+            raise
     
     def delete_file(self, path: str) -> None:
         """Delete a file."""
@@ -108,9 +117,11 @@ class S3StorageBackend(StorageBackend):
         
         files = []
         paginator = self.s3_client.get_paginator("list_objects_v2")
-        
+        paginate_kwargs = {"Bucket": self.bucket_name, "Prefix": prefix}
+        if not recursive:
+            paginate_kwargs["Delimiter"] = "/"
         try:
-            for page in paginator.paginate(Bucket=self.bucket_name, Prefix=prefix, Delimiter="/" if not recursive else None):
+            for page in paginator.paginate(**paginate_kwargs):
                 # List "directories" (common prefixes)
                 if "CommonPrefixes" in page:
                     for prefix_info in page["CommonPrefixes"]:

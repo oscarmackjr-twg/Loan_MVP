@@ -1,0 +1,58 @@
+{
+  "aws_services": {
+    "--version": [
+      "Write-Success"
+    ],
+    "sso": [
+      "login"
+    ],
+    "sts": [
+      "get-caller-identity"
+    ],
+    "organizations": [
+      "describe-account"
+    ],
+    "ecs": [
+      "create-service"
+    ]
+  },
+  "infrastructure_variables": {
+    "Region": "us-east-1",
+    "AppName": "loan-engine",
+    "Environment": "test",
+    "DBUsername": "postgres",
+    "VpcName": "$AppName-vpc",
+    "ClusterName": "$AppName-$Environment",
+    "ServiceName": "$AppName-$Environment",
+    "TaskFamily": "$AppName-$Environment",
+    "DBName": "loan_engine",
+    "DBInstanceClass": "db.t3.micro",
+    "DBInstanceIdentifier": "$AppName-$Environment-db",
+    "LogGroupName": "/ecs/$AppName-$Environment",
+    "ALBName": "$AppName-$Environment-alb",
+    "SubnetIds": "$PublicSubnet1Id,$PublicSubnet2Id",
+    "PrivateSubnetIds": "$PrivateSubnet1Id,$PrivateSubnet2Id",
+    "AlbSgName": "$AppName-$Environment-alb-sg",
+    "EcsSgName": "$AppName-$Environment-ecs-sg",
+    "RdsSgName": "$AppName-$Environment-rds-sg",
+    "TaskExecutionRoleName": "ecsTaskExecutionRole-$AppName",
+    "trustPolicyFile": "$env:TEMP\\ecs-trust-policy.json",
+    "logsPolicyFile": "$env:TEMP\\ecs-logs-policy.json",
+    "execSecretsPolicyFile": "$env:TEMP\\ecs-execution-secrets-policy.json",
+    "TaskRoleName": "ecsTaskRole-$AppName",
+    "secretsPolicyFile": "$env:TEMP\\ecs-secrets-policy.json",
+    "bucketArn": "arn:aws:s3:::$S3BucketName",
+    "bucketPrefixArn": "arn:aws:s3:::$S3BucketName/*",
+    "s3PolicyFile": "$env:TEMP\\ecs-s3-policy.json",
+    "DbSubnetGroupName": "$AppName-$Environment-db-subnet",
+    "DbSecretName": "$AppName/$Environment/DATABASE_URL",
+    "DatabaseUrl": "postgresql://${DBUsername}:${DBPassword}@${DBEndpoint}:5432/${DBName}?sslmode=require",
+    "SecretKeyName": "$AppName/$Environment/SECRET_KEY",
+    "ECRRepoUri": "$accountId.dkr.ecr.$Region.amazonaws.com/$ECRRepoName",
+    "imageTag": "$ECRRepoUri`:latest",
+    "TargetGroupName": "$AppName-$Environment-tg",
+    "TaskDefFile": "$env:TEMP\\task-definition.json"
+  },
+  "deployment_method": "ECS via AWS CLI (imperative PowerShell script)",
+  "recommendation": "Convert to Terraform or CDK for Codex generation"
+}

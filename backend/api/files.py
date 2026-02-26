@@ -1,11 +1,11 @@
 """File management API endpoints."""
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Query
-from fastapi.responses import StreamingResponse, JSONResponse
-from typing import List, Optional
-from storage import get_storage_backend, StorageType
-from storage.base import FileInfo
-from auth.routes import get_current_user
+from fastapi.responses import StreamingResponse
+from typing import Optional
+from storage import get_storage_backend
+from auth.security import get_current_user
 from db.models import User
+from config.settings import settings
 import io
 import logging
 
@@ -18,12 +18,13 @@ router = APIRouter(prefix="/api/files", tags=["files"])
 async def list_files(
     path: str = Query("", description="Directory path to list"),
     recursive: bool = Query(False, description="List files recursively"),
+    area: str = Query("inputs", description="Storage area: inputs | outputs | output_share"),
     storage_type: Optional[str] = Query(None, description="Override storage type (local/s3)"),
     current_user: User = Depends(get_current_user)
 ):
     """List files in a directory."""
     try:
-        storage = get_storage_backend(storage_type=storage_type)
+        storage = get_storage_backend(storage_type=storage_type, area=area)
         files = storage.list_files(path or "", recursive=recursive)
         
         return {
@@ -47,20 +48,30 @@ async def list_files(
 async def upload_file(
     file: UploadFile = File(...),
     path: str = Query("", description="Destination path (directory or full file path)"),
+    area: str = Query("inputs", description="Storage area: inputs | outputs | output_share"),
     storage_type: Optional[str] = Query(None, description="Override storage type (local/s3)"),
     current_user: User = Depends(get_current_user)
 ):
-    """Upload a file."""
+    """Upload a file. When using S3, uploads always go to the inputs area so the pipeline can read them."""
     try:
-        storage = get_storage_backend(storage_type=storage_type)
+        # Per spec: dropped files must land in the input directory. When S3 is used, force inputs area.
+        effective_area = area
+        if (storage_type or settings.STORAGE_TYPE) == "s3":
+            effective_area = "inputs"
+        storage = get_storage_backend(storage_type=storage_type, area=effective_area)
+        
+        # When S3, default path so files drop into bucket/input/input/files_required/ (path "input/files_required/" under inputs area)
+        effective_path = (path or "").strip()
+        if (storage_type or settings.STORAGE_TYPE) == "s3" and not effective_path:
+            effective_path = "input/files_required/"
         
         # Determine destination path
-        if path and not path.endswith("/"):
+        if effective_path and not effective_path.endswith("/"):
             # If path doesn't end with /, treat as full file path
-            dest_path = path
+            dest_path = effective_path
         else:
             # Use filename in the specified directory
-            dest_path = f"{path.rstrip('/')}/{file.filename}" if path else file.filename
+            dest_path = f"{effective_path.rstrip('/')}/{file.filename}" if effective_path else file.filename
         
         # Read file content
         content = await file.read()
@@ -73,20 +84,29 @@ async def upload_file(
             "path": dest_path,
             "size": len(content)
         }
+    except ValueError as e:
+        # S3 NoSuchBucket or other clear config errors
+        logger.error("Upload error: %s", e)
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         logger.error(f"Error uploading file: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to upload file: {str(e)}")
+        detail = str(e)
+        if "NoSuchBucket" in detail or "bucket" in detail.lower():
+            if getattr(settings, "S3_BUCKET_NAME", None):
+                detail = f"{detail} (Configured bucket: {settings.S3_BUCKET_NAME}. Create it in S3 or set S3_BUCKET_NAME to an existing bucket.)"
+        raise HTTPException(status_code=500, detail=f"Failed to upload file: {detail}")
 
 
 @router.get("/download/{file_path:path}")
 async def download_file(
     file_path: str,
+    area: str = Query("inputs", description="Storage area: inputs | outputs | output_share"),
     storage_type: Optional[str] = Query(None, description="Override storage type (local/s3)"),
     current_user: User = Depends(get_current_user)
 ):
     """Download a file."""
     try:
-        storage = get_storage_backend(storage_type=storage_type)
+        storage = get_storage_backend(storage_type=storage_type, area=area)
         
         if not storage.file_exists(file_path):
             raise HTTPException(status_code=404, detail="File not found")
@@ -124,12 +144,13 @@ async def download_file(
 async def get_file_url(
     file_path: str,
     expires_in: int = Query(3600, description="URL expiration time in seconds"),
+    area: str = Query("inputs", description="Storage area: inputs | outputs | output_share"),
     storage_type: Optional[str] = Query(None, description="Override storage type (local/s3)"),
     current_user: User = Depends(get_current_user)
 ):
     """Get a presigned URL for file access (S3) or file path (local)."""
     try:
-        storage = get_storage_backend(storage_type=storage_type)
+        storage = get_storage_backend(storage_type=storage_type, area=area)
         
         if not storage.file_exists(file_path):
             raise HTTPException(status_code=404, detail="File not found")
@@ -147,12 +168,13 @@ async def get_file_url(
 @router.delete("/{file_path:path}")
 async def delete_file(
     file_path: str,
+    area: str = Query("inputs", description="Storage area: inputs | outputs | output_share"),
     storage_type: Optional[str] = Query(None, description="Override storage type (local/s3)"),
     current_user: User = Depends(get_current_user)
 ):
     """Delete a file."""
     try:
-        storage = get_storage_backend(storage_type=storage_type)
+        storage = get_storage_backend(storage_type=storage_type, area=area)
         
         if not storage.file_exists(file_path):
             raise HTTPException(status_code=404, detail="File not found")
@@ -170,12 +192,13 @@ async def delete_file(
 @router.post("/mkdir")
 async def create_directory(
     path: str = Query(..., description="Directory path to create"),
+    area: str = Query("inputs", description="Storage area: inputs | outputs | output_share"),
     storage_type: Optional[str] = Query(None, description="Override storage type (local/s3)"),
     current_user: User = Depends(get_current_user)
 ):
     """Create a directory."""
     try:
-        storage = get_storage_backend(storage_type=storage_type)
+        storage = get_storage_backend(storage_type=storage_type, area=area)
         storage.create_directory(path)
         
         return {"message": "Directory created successfully", "path": path}

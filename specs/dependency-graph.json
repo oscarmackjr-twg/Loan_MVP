@@ -1,0 +1,45 @@
+{
+  "App.tsx": [
+    "components/Layout.tsx",
+    "components/ProtectedRoute.tsx",
+    "contexts/AuthContext.tsx",
+    "pages/Dashboard.tsx",
+    "pages/Exceptions.tsx",
+    "pages/FileManager.tsx",
+    "pages/Login.tsx",
+    "pages/RejectedLoans.tsx",
+    "pages/RunDetail.tsx",
+    "pages/Runs.tsx"
+  ],
+  "components/FileBrowser.tsx": [],
+  "components/FileUpload.tsx": [],
+  "components/Layout.tsx": [
+    "contexts/AuthContext.tsx"
+  ],
+  "components/ProtectedRoute.tsx": [
+    "contexts/AuthContext.tsx"
+  ],
+  "contexts/AuthContext.tsx": [],
+  "index.css": [],
+  "main.tsx": [
+    "App.tsx",
+    "index.css"
+  ],
+  "pages/Dashboard.tsx": [],
+  "pages/Exceptions.tsx": [
+    "utils/rejectionCriteria.ts"
+  ],
+  "pages/FileManager.tsx": [],
+  "pages/Login.tsx": [
+    "contexts/AuthContext.tsx"
+  ],
+  "pages/RejectedLoans.tsx": [
+    "utils/rejectionCriteria.ts"
+  ],
+  "pages/RunDetail.tsx": [
+    "utils/rejectionCriteria.ts"
+  ],
+  "pages/Runs.tsx": [],
+  "utils/rejectionCriteria.ts": [],
+  "vite-env.d.ts": []
+}

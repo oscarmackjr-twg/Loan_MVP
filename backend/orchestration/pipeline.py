@@ -16,12 +16,13 @@ from rules.comap import check_comap_prime, check_comap_sfy, check_comap_notes
 from rules.eligibility import check_eligibility_prime, check_eligibility_sfy
 from outputs.excel_exports import export_exception_reports
 from outputs.eligibility_reports import export_eligibility_report
+from storage import get_storage_backend
 from db.models import PipelineRun, RunStatus, LoanException, LoanFact
+from orchestration.archive_run import archive_run
 from db.connection import SessionLocal
 from config.settings import settings
 from utils.date_utils import calculate_pipeline_dates
 from utils.file_discovery import discover_input_files
-from utils.path_utils import get_sales_team_output_path, get_sales_team_share_path
 from utils.json_serial import to_json_safe
 from config.rejection_criteria import (
     get_rejection_criteria,
@@ -75,14 +76,32 @@ class PipelineExecutor:
             data['underwriting_sfy_notes'] = pd.read_excel(underwriting_file, sheet_name='SFY - Notes')
             data['underwriting_prime_notes'] = pd.read_excel(underwriting_file, sheet_name='Prime - Notes')
             
-            # Load CoMAP grids
+            # Load CoMAP grids (match February_Baseline notebook sheets)
             data['sfy_comap'] = pd.read_excel(underwriting_file, sheet_name='SFY COMAP')
             data['sfy_comap2'] = pd.read_excel(underwriting_file, sheet_name='SFY COMAP2')
             data['prime_comap'] = pd.read_excel(underwriting_file, sheet_name='Prime CoMAP')
-            data['sfy_comap_oct25'] = pd.read_excel(underwriting_file, sheet_name='SFY COMAP')
-            data['sfy_comap_oct25_2'] = pd.read_excel(underwriting_file, sheet_name='SFY COMAP2')
-            data['prime_comap_oct25'] = pd.read_excel(underwriting_file, sheet_name='Prime CoMAP')
             data['notes_comap'] = pd.read_excel(underwriting_file, sheet_name='Notes CoMAP')
+            # Oct25 variants (notebook: SFY COMAP-Oct25, SFY COMAP-Oct25-2, Prime CoMAP-Oct25, Prime CoMAP-Oct25-2)
+            try:
+                data['sfy_comap_oct25'] = pd.read_excel(underwriting_file, sheet_name='SFY COMAP-Oct25')
+            except Exception:
+                data['sfy_comap_oct25'] = data['sfy_comap'].copy()
+            try:
+                data['sfy_comap_oct25_2'] = pd.read_excel(underwriting_file, sheet_name='SFY COMAP-Oct25-2')
+            except Exception:
+                data['sfy_comap_oct25_2'] = data['sfy_comap2'].copy()
+            try:
+                data['prime_comap_oct25'] = pd.read_excel(underwriting_file, sheet_name='Prime CoMAP-Oct25')
+            except Exception:
+                data['prime_comap_oct25'] = data['prime_comap'].copy()
+            try:
+                data['prime_comap_oct25_2'] = pd.read_excel(underwriting_file, sheet_name='Prime CoMAP-Oct25-2')
+            except Exception:
+                data['prime_comap_oct25_2'] = data['prime_comap'].copy()
+            try:
+                data['prime_comap_new'] = pd.read_excel(underwriting_file, sheet_name='Prime CoMAP - New')
+            except Exception:
+                data['prime_comap_new'] = data['prime_comap'].copy()
             
             logger.info("Reference data loaded successfully")
             
@@ -97,15 +116,19 @@ class PipelineExecutor:
         files = {}
         
         try:
-            # Calculate dates for file discovery
-            pdate, yesterday, last_end = calculate_pipeline_dates(self.context.pdate)
+            # Calculate dates for file discovery (driven by pdate + Tday/base date)
+            pdate, yesterday, last_end = calculate_pipeline_dates(
+                self.context.pdate,
+                getattr(self.context, "tday", None),
+            )
             
             # Discover input files
             file_paths = discover_input_files(
                 directory=folder,
                 yesterday=yesterday,
-                sfy_date=None,  # Auto-discover most recent
-                prime_date=None  # Auto-discover most recent
+                sfy_date=None,   # Auto-discover most recent
+                prime_date=None,  # Auto-discover most recent
+                last_end=last_end,
             )
             
             # Load tape loans
@@ -352,15 +375,20 @@ class PipelineExecutor:
             all_exceptions.extend(get_underwriting_exceptions(buy_df, flagged_notes, 'underwriting_notes'))
             
             self._set_phase("comap")
-            # CoMAP checks
+            # CoMAP checks (per-loan Submit Date; mirrors February_Baseline)
             loan_not_in_comap = check_comap_prime(
-                buy_df, ref_data['prime_comap'], ref_data['prime_comap_oct25'],
-                ref_data['prime_comap_oct25'], pd.to_datetime(self.context.pdate)
+                buy_df,
+                ref_data['prime_comap'],
+                ref_data['prime_comap_oct25'],
+                ref_data['prime_comap_oct25_2'],
+                ref_data['prime_comap_new'],
             )
             loan_not_in_comap.extend(check_comap_sfy(
-                buy_df, ref_data['sfy_comap'], ref_data['sfy_comap2'],
-                ref_data['sfy_comap_oct25'], ref_data['sfy_comap_oct25_2'],
-                pd.to_datetime(self.context.pdate)
+                buy_df,
+                ref_data['sfy_comap'],
+                ref_data['sfy_comap2'],
+                ref_data['sfy_comap_oct25'],
+                ref_data['sfy_comap_oct25_2'],
             ))
             loan_not_in_comap.extend(check_comap_notes(buy_df, ref_data['notes_comap']))
             
@@ -390,27 +418,49 @@ class PipelineExecutor:
             notes_flagged_df = buy_df[buy_df['SELLER Loan #'].isin(flagged_notes)]
             comap_failed_df = buy_df[buy_df['SELLER Loan #'].isin([i[0] for i in loan_not_in_comap])]
             
-            # Export reports (with sales team isolation)
-            output_dir = get_sales_team_output_path(
-                folder,
-                self.context.sales_team_id
-            )
-            output_share_dir = get_sales_team_share_path(
-                folder,
-                self.context.sales_team_id
-            )
+            # Special asset outputs (notebook: special_asset_prime.xlsx; mirror SFY)
+            new_prog = buy_df.get("new_programs", pd.Series([False] * len(buy_df)))
+            plat = buy_df.get("platform", buy_df.get("Platform", pd.Series([""] * len(buy_df)))).astype(str).str.lower()
+            repurchase = buy_df.get("Repurchase", pd.Series([False] * len(buy_df)))
+            special_asset_prime_df = buy_df[(new_prog == True) & (repurchase == False) & (plat == "prime")]
+            special_asset_sfy_df = buy_df[(new_prog == True) & (repurchase == False) & (plat == "sfy")]
+            
+            # Export reports to configured storage (local in dev, S3 in test/prod).
+            output_prefix = self.context.output_dir or f"runs/{self.context.run_id}"
+            share_prefix = output_prefix
+            storage_outputs = get_storage_backend(area="outputs")
+            storage_share = get_storage_backend(area="output_share")
+
             reports = export_exception_reports(
-                purchase_mismatch, flagged_df, notes_flagged_df, comap_failed_df,
-                output_dir, output_share_dir
+                purchase_mismatch,
+                flagged_df,
+                notes_flagged_df,
+                comap_failed_df,
+                output_prefix=output_prefix,
+                output_share_prefix=share_prefix,
+                storage=storage_outputs,
+                share_storage=storage_share,
+                special_asset_prime=special_asset_prime_df,
+                special_asset_sfy=special_asset_sfy_df,
             )
             
-            # Export eligibility check results
+            # Export eligibility check results (local path for archiver)
             eligibility_report_path = export_eligibility_report(
                 eligibility_prime,
                 eligibility_sfy,
-                output_dir
+                f"{settings.OUTPUT_DIR}/{output_prefix}" if settings.STORAGE_TYPE == "local" else f"/tmp/{output_prefix}"
             )
-            reports['eligibility_report'] = eligibility_report_path
+            reports["eligibility_report"] = eligibility_report_path
+            
+            # Write eligibility files into outputs storage so they are first-class downloadable outputs
+            elig_dir = Path(eligibility_report_path).parent
+            for name, key in [("eligibility_checks.json", "eligibility_checks_json"), ("eligibility_checks_summary.xlsx", "eligibility_checks_summary")]:
+                p = elig_dir / name
+                if p.exists():
+                    content = p.read_bytes()
+                    storage_path = f"{output_prefix}/{name}"
+                    storage_outputs.write_file(storage_path, content)
+                    reports[key] = storage_path
             
             # Build rejected_loans map: first rejection_criteria per loan (for disposition)
             rejected_loans = {}
@@ -436,6 +486,18 @@ class PipelineExecutor:
                 total_loans=len(final_df),
                 total_balance=float(final_df['Orig. Balance'].sum()),
                 exceptions_count=len(all_exceptions)
+            )
+            
+            # Archive input and output files to archive/{run_id}/input and archive/{run_id}/output
+            eligibility_report_path = reports.get("eligibility_report")
+            archive_run(
+                run_id=self.context.run_id,
+                folder=folder,
+                pdate=self.context.pdate,
+                output_prefix=output_prefix,
+                reports=reports,
+                output_storage=storage_outputs,
+                eligibility_report_local_path=eligibility_report_path,
             )
             
             # Store eligibility results in run record

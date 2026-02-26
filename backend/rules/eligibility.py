@@ -82,7 +82,7 @@ def check_eligibility_prime(final_df_all: pd.DataFrame) -> Dict[str, Any]:
         (prime_df['Lender Price(%)'] <= 103)
     ]['Orig. Balance'].sum() / total_balance
     check_h3 = (prime_df['Dealer Fee'] * prime_df['Orig. Balance']).sum() / total_balance
-    results['check_h1'] = {'value': check_h1, 'pass': check_h1 < 101.87}
+    results['check_h1'] = {'value': check_h1, 'pass': check_h1 <= 102}  # notebook: h1<=102
     results['check_h2'] = {'value': check_h2, 'pass': check_h2 < 0.35}
     results['check_h3'] = {'value': check_h3, 'pass': check_h3 < 0.15}
     
@@ -237,7 +237,7 @@ def check_eligibility_sfy(final_df_all: pd.DataFrame, buy_df: pd.DataFrame = Non
         (sfy_df['loan program'] != "Unsec Std - 999 - 120")
     ]['Orig. Balance'].sum() / total_balance
     check_f4 = (sfy_df['Dealer Fee'] * sfy_df['Orig. Balance']).sum() / total_balance
-    results['check_f1'] = {'value': check_f1, 'pass': check_f1 <= 101.21}
+    results['check_f1'] = {'value': check_f1, 'pass': check_f1 <= 101.25}  # notebook: f1<=101.25
     results['check_f2'] = {'value': check_f2, 'pass': check_f2 <= 0.4}
     results['check_f3'] = {'value': check_f3, 'pass': check_f3 <= 0.37}
     results['check_f4'] = {'value': check_f4, 'pass': check_f4 <= 0.15}

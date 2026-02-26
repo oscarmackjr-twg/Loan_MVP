@@ -1,0 +1,46 @@
+{
+  "project_root": "C:\\Users\\omack\\Intrepid\\pythonFramework\\cursor_loan_engine",
+  "frameworks_detected": {
+    "FastAPI": [
+      "backend\\auth\\validators.py",
+      "backend\\tests\\test_auth_validators.py",
+      "backend\\auth\\routes.py",
+      "backend\\api\\routes.py",
+      "backend\\api\\files.py",
+      "backend\\api\\main.py",
+      "backend\\auth\\security.py",
+      "backend\\tests\\test_api_routes.py"
+    ],
+    "Express (Node)": [
+      "backend\\api\\main.py"
+    ],
+    "Django": [
+      "backend\\utils\\path_utils.py",
+      "backend\\storage\\s3.py",
+      "backend\\scheduler\\job_scheduler.py",
+      "backend\\storage\\local.py"
+    ]
+  },
+  "route_files": [
+    {
+      "file": "backend\\api\\files.py",
+      "type": "decorator_route",
+      "match_count": 6
+    },
+    {
+      "file": "backend\\api\\main.py",
+      "type": "decorator_route",
+      "match_count": 4
+    },
+    {
+      "file": "backend\\api\\routes.py",
+      "type": "decorator_route",
+      "match_count": 13
+    },
+    {
+      "file": "backend\\auth\\routes.py",
+      "type": "decorator_route",
+      "match_count": 5
+    }
+  ]
+}

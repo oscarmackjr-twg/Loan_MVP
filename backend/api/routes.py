@@ -2,8 +2,8 @@
 import io
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, HTTPException, Query
-from fastapi.responses import Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 from typing import List, Optional
 import pandas as pd
@@ -16,15 +16,42 @@ from auth.validators import get_user_sales_team_id, validate_sales_team_access
 from auth.audit import log_data_access, log_authorization_failure
 from orchestration.run_context import RunContext
 from orchestration.pipeline import PipelineExecutor
+from orchestration.s3_input_sync import sync_s3_input_to_temp, remove_temp_input_dir
+from orchestration.archive_run import archive_previous_run
 from config.settings import settings
+from storage import get_storage_backend
+from utils.holiday_calendar import (
+    get_supported_countries,
+    get_holidays_list,
+    is_business_day,
+    PDATE_COUNTRY,
+)
+from utils.date_utils import calculate_next_tuesday, calculate_pipeline_dates
 
 router = APIRouter(prefix="/api", tags=["api"])
+
+# All notebook-style outputs (mirror February_Baseline + eligibility). Keys must match report keys from pipeline.
+NOTEBOOK_OUTPUT_DEFS = [
+    {"key": "flagged_loans", "filename": "flagged_loans.xlsx", "label": "Flagged loans"},
+    {"key": "purchase_price_mismatch", "filename": "purchase_price_mismatch.xlsx", "label": "Purchase price mismatch"},
+    {"key": "comap_not_passed", "filename": "comap_not_passed.xlsx", "label": "CoMAP not passed"},
+    {"key": "notes_flagged_loans", "filename": "notes_flagged_loans.xlsx", "label": "Notes flagged loans"},
+    {"key": "special_asset_prime", "filename": "special_asset_prime.xlsx", "label": "Special asset (Prime)"},
+    {"key": "special_asset_sfy", "filename": "special_asset_sfy.xlsx", "label": "Special asset (SFY)"},
+    {"key": "eligibility_checks_json", "filename": "eligibility_checks.json", "label": "Eligibility checks (JSON)"},
+    {"key": "eligibility_checks_summary", "filename": "eligibility_checks_summary.xlsx", "label": "Eligibility checks summary"},
+]
 
 
 class RunCreate(BaseModel):
     """Pipeline run creation model."""
+    # Purchase date (YYYY-MM-DD). If omitted, defaults to next Tuesday (US business day; if that Tuesday is a US holiday, the following business day).
     pdate: Optional[str] = None
+    # Base "today" date (YYYY-MM-DD) used for file naming (yesterday, last month end).
+    # Defaults to the current system date when omitted.
+    tday: Optional[str] = None
     irr_target: float = 8.05
+    # Local: filesystem path to input folder. S3 (AWS): key prefix under inputs area (e.g. "legacy", "sales_team_1").
     folder: str = "C:/Users/omack/Intrepid/pythonFramework/loan_engine/legacy"
 
 
@@ -34,6 +61,8 @@ class RunResponse(BaseModel):
     run_id: str
     status: str
     sales_team_id: Optional[int]
+    created_by_id: Optional[int] = None
+    created_by_username: Optional[str] = None
     total_loans: int
     total_balance: float
     exceptions_count: int
@@ -99,6 +128,61 @@ def filter_by_sales_team(query, user: User):
         return query  # Analysts see all for now
 
 
+@router.get("/config")
+async def get_config(current_user: User = Depends(get_current_user)):
+    """Return app config for the UI (e.g. storage type, S3 bucket when using S3)."""
+    out = {"storage_type": settings.STORAGE_TYPE}
+    if settings.STORAGE_TYPE == "s3" and settings.S3_BUCKET_NAME:
+        out["s3_bucket_name"] = settings.S3_BUCKET_NAME
+        out["s3_region"] = settings.S3_REGION or "us-east-1"
+    return out
+
+
+# ---------- Business holiday calendar (US, India, England, Singapore); used for pdate ----------
+@router.get("/calendar/countries")
+async def list_calendar_countries(current_user: User = Depends(get_current_user)):
+    """List supported holiday calendar countries (US, IN, GB, SG) for the next 10 years."""
+    return get_supported_countries()
+
+
+@router.get("/calendar/holidays")
+async def list_holidays(
+    country: str = Query(..., description="Country code: US, IN, GB, SG"),
+    year: Optional[int] = Query(None, description="Year (default: current through +10)"),
+    year_end: Optional[int] = Query(None, description="End year for range (use with year)"),
+    current_user: User = Depends(get_current_user),
+):
+    """List holidays for a country. Covers current year through current + 10 years."""
+    supported = get_supported_countries()
+    if country not in supported:
+        raise HTTPException(status_code=400, detail=f"Unsupported country. Use one of: {list(supported.keys())}")
+    return get_holidays_list(country, year=year, year_end=year_end)
+
+
+@router.get("/calendar/next-posting-date")
+async def get_next_posting_date(
+    tday: Optional[str] = Query(None, description="Base date YYYY-MM-DD (default: today)"),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Return the next posting date (pdate). Next Tuesday that is a US business day,
+    or the following business day if that Tuesday is a US holiday.
+    """
+    base = None
+    if tday:
+        try:
+            base = datetime.strptime(tday, "%Y-%m-%d")
+        except ValueError:
+            raise HTTPException(status_code=400, detail="tday must be YYYY-MM-DD")
+    pdate = calculate_next_tuesday(base_date=base)
+    pdate_dt = datetime.strptime(pdate, "%Y-%m-%d").date()
+    return {
+        "pdate": pdate,
+        "is_us_business_day": is_business_day(pdate_dt, country=PDATE_COUNTRY),
+        "country_used": PDATE_COUNTRY,
+    }
+
+
 @router.post("/pipeline/run", response_model=RunResponse)
 async def create_pipeline_run(
     run_data: RunCreate,
@@ -114,21 +198,58 @@ async def create_pipeline_run(
         sales_team_id=sales_team_id,
         created_by_id=current_user.id,
         pdate=run_data.pdate,
-        irr_target=run_data.irr_target
+        irr_target=run_data.irr_target,
+        tday=run_data.tday,
     )
     
-    # Add sales team ID to file paths for isolation
+    # Add sales team ID to file paths for isolation.
+    # Inputs go to input directory; outputs go to output directory.
+    # At the start of a run, the previous run is archived; at the end, the current run is archived.
     if sales_team_id:
         context.input_file_path = f"{run_data.folder}/sales_team_{sales_team_id}"
-        context.output_dir = f"{run_data.folder}/sales_team_{sales_team_id}/output"
+        context.output_dir = f"sales_team_{sales_team_id}/runs/{context.run_id}"
     else:
         context.input_file_path = run_data.folder
-        context.output_dir = f"{run_data.folder}/output"
+        context.output_dir = f"runs/{context.run_id}"
     
-    # Execute pipeline
+    # At the start of this run, archive the previous run (outputs and, when S3, inputs from storage).
+    prev_run_query = db.query(PipelineRun).order_by(PipelineRun.created_at.desc()).limit(1)
+    prev_run_query = filter_by_sales_team(prev_run_query, current_user)
+    prev_run = prev_run_query.first()
+    if prev_run and prev_run.run_id != context.run_id:
+        archive_previous_run(
+            prev_run_id=prev_run.run_id,
+            output_prefix=prev_run.output_dir or f"runs/{prev_run.run_id}",
+            input_prefix=prev_run.input_file_path,
+        )
+    
+    # When using S3, run reads from bucket/input/input/files_required/ (inputs area = bucket/input/, prefix "input").
+    temp_dir = None
+    if settings.STORAGE_TYPE == "s3":
+        s3_prefix = "input"  # under inputs area (bucket/input/) -> bucket/input/input/files_required/
+        try:
+            input_storage = get_storage_backend(area="inputs")
+            temp_dir = sync_s3_input_to_temp(input_storage, s3_prefix)
+            folder_for_run = temp_dir
+        except FileNotFoundError as e:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "No files found in input/input/files_required/ (s3://bucket/input/input/files_required/). "
+                    "Upload files in File Manager to path 'input/files_required' (default). Then start the run again."
+                ),
+            ) from e
+        except Exception as e:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Failed to load inputs from S3 input directory: {str(e)}",
+            ) from e
+    else:
+        folder_for_run = run_data.folder
+    
     try:
         with PipelineExecutor(context) as executor:
-            result = executor.execute(run_data.folder)
+            result = executor.execute(folder_for_run)
         
         # Get updated run record
         run_record = db.query(PipelineRun).filter(PipelineRun.run_id == context.run_id).first()
@@ -136,10 +257,14 @@ async def create_pipeline_run(
         
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Pipeline execution failed: {str(e)}")
+    finally:
+        if temp_dir:
+            remove_temp_input_dir(temp_dir)
 
 
 @router.get("/runs", response_model=List[RunResponse])
 async def list_runs(
+    response: Response,
     skip: int = Query(0, ge=0),
     limit: int = Query(100, ge=1, le=1000),
     status: Optional[str] = None,
@@ -148,6 +273,7 @@ async def list_runs(
     current_user: User = Depends(get_current_user)
 ):
     """List pipeline runs with pagination. Filter by run_weekday for day-of-week segregation."""
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
     query = db.query(PipelineRun)
     
     # Apply sales team filter
@@ -195,6 +321,173 @@ async def get_run(
     log_data_access(current_user, 'pipeline_run', run_id, sales_team_id=run.sales_team_id)
     
     return run
+
+
+@router.get("/runs/{run_id}/notebook-outputs")
+async def list_notebook_outputs(
+    run_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    List the 4 notebook-replacement output files for a run.
+
+    Files are stored under the per-run prefix `PipelineRun.output_dir` in the **outputs** storage area
+    (local disk in development, S3 in test/production).
+    """
+    query = db.query(PipelineRun).filter(PipelineRun.run_id == run_id)
+    query = filter_by_sales_team(query, current_user)
+    run = query.first()
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+
+    prefix = (run.output_dir or f"runs/{run_id}").strip("/")
+    # Back-compat: older runs stored absolute local paths in output_dir. Those aren't usable
+    # with the storage abstraction (which expects a relative key within the outputs area).
+    if ":" in prefix or prefix.startswith(("/", "\\")):
+        prefix = f"runs/{run_id}"
+    storage = get_storage_backend(area="outputs")
+
+    outputs = []
+    for d in NOTEBOOK_OUTPUT_DEFS:
+        path = f"{prefix}/{d['filename']}"
+        outputs.append(
+            {
+                "key": d["key"],
+                "label": d["label"],
+                "path": path,
+                "exists": storage.file_exists(path),
+            }
+        )
+    return {"run_id": run_id, "prefix": prefix, "outputs": outputs}
+
+
+def _media_type_for_filename(filename: str) -> str:
+    """Return media type for notebook output download."""
+    if filename.endswith(".json"):
+        return "application/json"
+    if filename.endswith(".xlsx"):
+        return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    return "application/octet-stream"
+
+
+@router.get("/runs/{run_id}/notebook-outputs/{output_key}/download")
+async def download_notebook_output(
+    run_id: str,
+    output_key: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Download one of the notebook-replacement output files for a run (Excel or JSON)."""
+    query = db.query(PipelineRun).filter(PipelineRun.run_id == run_id)
+    query = filter_by_sales_team(query, current_user)
+    run = query.first()
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+
+    match = next((d for d in NOTEBOOK_OUTPUT_DEFS if d["key"] == output_key), None)
+    if not match:
+        raise HTTPException(status_code=404, detail="Unknown output key")
+
+    prefix = (run.output_dir or f"runs/{run_id}").strip("/")
+    if ":" in prefix or prefix.startswith(("/", "\\")):
+        prefix = f"runs/{run_id}"
+    path = f"{prefix}/{match['filename']}"
+    storage = get_storage_backend(area="outputs")
+    if not storage.file_exists(path):
+        raise HTTPException(status_code=404, detail="File not found")
+
+    content = storage.read_file(path)
+    return StreamingResponse(
+        io.BytesIO(content),
+        media_type=_media_type_for_filename(match["filename"]),
+        headers={"Content-Disposition": f'attachment; filename="{match["filename"]}"'},
+    )
+
+
+@router.get("/runs/{run_id}/archive")
+async def list_run_archive(
+    run_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    List archived input and output files for a run (archive/{run_id}/input and archive/{run_id}/output).
+    """
+    query = db.query(PipelineRun).filter(PipelineRun.run_id == run_id)
+    query = filter_by_sales_team(query, current_user)
+    run = query.first()
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+
+    try:
+        storage = get_storage_backend(area="archive")
+    except Exception:
+        return {"run_id": run_id, "input": [], "output": [], "error": "Archive storage not configured"}
+
+    def list_dir(prefix: str, download_prefix: str):
+        try:
+            files = storage.list_files(prefix, recursive=False)
+            return [
+                {
+                    "path": f.path,
+                    "size": f.size,
+                    "last_modified": f.last_modified,
+                    "name": f.path.split("/")[-1] if "/" in f.path else f.path,
+                    "download_path": f"{download_prefix}/{f.path.split('/')[-1]}" if "/" in f.path else f"{download_prefix}/{f.path}",
+                }
+                for f in files if not f.is_directory
+            ]
+        except Exception:
+            return []
+
+    input_prefix = f"{run_id}/input"
+    output_prefix = f"{run_id}/output"
+    input_files = list_dir(input_prefix, "input")
+    output_files = list_dir(output_prefix, "output")
+    return {"run_id": run_id, "input": input_files, "output": output_files}
+
+
+@router.get("/runs/{run_id}/archive/download")
+async def download_run_archive_file(
+    run_id: str,
+    path: str = Query(..., description="Path relative to run archive: input/filename or output/filename"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Download a file from the run archive (input or output)."""
+    if ".." in path or path.strip("/").startswith(".."):
+        raise HTTPException(status_code=400, detail="Invalid path")
+    if not (path.startswith("input/") or path.startswith("output/")):
+        raise HTTPException(status_code=400, detail="Path must be input/... or output/...")
+    query = db.query(PipelineRun).filter(PipelineRun.run_id == run_id)
+    query = filter_by_sales_team(query, current_user)
+    run = query.first()
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+
+    full_key = f"{run_id}/{path}"
+    try:
+        storage = get_storage_backend(area="archive")
+    except Exception as e:
+        raise HTTPException(status_code=503, detail="Archive storage not available") from e
+    if not storage.file_exists(full_key):
+        raise HTTPException(status_code=404, detail="File not found")
+
+    content = storage.read_file(full_key)
+    filename = path.split("/")[-1]
+    media_type = "application/octet-stream"
+    if filename.endswith(".xlsx"):
+        media_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    elif filename.endswith(".csv"):
+        media_type = "text/csv"
+    elif filename.endswith(".json"):
+        media_type = "application/json"
+    return StreamingResponse(
+        io.BytesIO(content),
+        media_type=media_type,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @router.get("/summary/{run_id}", response_model=SummaryResponse)

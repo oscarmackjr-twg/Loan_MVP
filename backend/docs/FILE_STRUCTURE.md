@@ -127,6 +127,31 @@ C:/Users/omack/Intrepid/pythonFramework/loan_engine/legacy/
 mkdir "C:/Users/omack/Intrepid/pythonFramework/loan_engine/legacy/files_required"
 ```
 
+## Input and output directories
+
+- **Input files** are read from the **input** storage area (local `INPUT_DIR` or S3 inputs prefix). Uploaded or staged files go here; the pipeline reads from a folder/prefix within it.
+- **Output files** produced by the pipeline are written to the **output** storage area (local `OUTPUT_DIR` or S3 outputs prefix) under a per-run path (e.g. `runs/{run_id}/`).
+
+## Run archive
+
+At the **start** of a new run, the **previous** run is archived (its output directory and, when using S3, its input prefix). After the **current** run completes, that run’s inputs and outputs are also archived. Archive layout (configurable via `ARCHIVE_DIR`, default `./data/archive`):
+
+```
+{ARCHIVE_DIR}/
+├── {run_id}/
+│   ├── input/    ← copies of input files used for this run
+│   │   ├── Tape20Loans_MM-DD-YYYY.csv
+│   │   ├── MASTER_SHEET.xlsx
+│   │   └── ...
+│   └── output/   ← outputs produced for this run
+│       ├── purchase_price_mismatch.xlsx
+│       ├── flagged_loans.xlsx
+│       ├── eligibility_checks.json
+│       └── ...
+```
+
+With S3 storage, the same structure is used under the `archive` prefix in the bucket.
+
 ## Sales Team Isolation
 
 If using sales team isolation, files should be in:

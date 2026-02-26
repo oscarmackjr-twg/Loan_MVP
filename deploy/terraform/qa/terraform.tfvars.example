@@ -1,0 +1,17 @@
+# Copy to terraform.tfvars and set values (do not commit terraform.tfvars with real secrets)
+# Or pass -var "db_password=..." and use TF_VAR_db_password
+
+aws_region   = "us-east-1"
+app_name     = "loan-engine"
+environment  = "qa"
+
+# S3: loan-engine-qa
+s3_bucket_name = "loan-engine-qa"
+
+# RDS: loan-engine-qa
+db_instance_identifier = "loan-engine-qa"
+db_password            = "Intrepid456$%"   # Set via env: $env:TF_VAR_db_password = "Intrepid456$%"
+
+# ECS (compute): loan-engine-qa
+ecs_cluster_name = "loan-engine-qa"
+ecs_service_name = "loan-engine-qa"
