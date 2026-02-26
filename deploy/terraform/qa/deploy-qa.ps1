@@ -10,7 +10,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$qaDir = $PSScriptRoot
+$qaDir = (Resolve-Path $PSScriptRoot).Path
 $repoRoot = (Resolve-Path (Join-Path $qaDir "..\..\..")).Path
 if (-not (Test-Path (Join-Path $repoRoot "deploy\terraform\qa\main.tf"))) {
     $repoRoot = (Get-Location).Path
@@ -18,6 +18,7 @@ if (-not (Test-Path (Join-Path $repoRoot "deploy\terraform\qa\main.tf"))) {
 
 # Ensure we're in QA Terraform directory for init/plan/apply
 Push-Location $qaDir
+$script:alreadyPopped = $false
 try {
     if (-not (Get-Command terraform -ErrorAction SilentlyContinue)) {
         Write-Error "Terraform not found. Install Terraform and ensure it is on PATH."
@@ -51,13 +52,15 @@ try {
     }
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+    $script:applicationUrl = (terraform output -raw application_url 2>$null)
     if ($PushImage) {
-        Pop-Location
-        $repoUrl = (terraform -chdir=$qaDir output -raw ecr_repository_url 2>$null)
+        $repoUrl = (terraform output -raw ecr_repository_url 2>$null)
         if (-not $repoUrl) {
             Write-Warning "Could not get ecr_repository_url from Terraform output. Push image manually."
             exit 0
         }
+        Pop-Location
+        $script:alreadyPopped = $true
         $repoHost = ($repoUrl -split "/")[0]
         Write-Host "Logging into ECR and building/pushing image..." -ForegroundColor Cyan
         $env:AWS_DEFAULT_REGION = $Region
@@ -73,13 +76,12 @@ try {
         $ecsArgs = @("ecs", "update-service", "--cluster", "loan-engine-qa", "--service", "loan-engine-qa", "--force-new-deployment", "--region", $Region)
         if ($Profile) { $ecsArgs = @("--profile", $Profile) + $ecsArgs }
         & aws @ecsArgs
-        Push-Location $qaDir
     }
 } finally {
-    Pop-Location -ErrorAction SilentlyContinue
+    if (-not $script:alreadyPopped) { Pop-Location -ErrorAction SilentlyContinue }
 }
 
-$url = (terraform -chdir=$qaDir output -raw application_url 2>$null)
+$url = $script:applicationUrl
 Write-Host ""
 Write-Host "QA deployment complete. Application URL: $url" -ForegroundColor Green
 Write-Host "Allow 2-5 minutes for ECS to become healthy, then initialize the database (migrations + seed)." -ForegroundColor Yellow
