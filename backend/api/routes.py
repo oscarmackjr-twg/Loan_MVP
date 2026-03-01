@@ -1,6 +1,7 @@
 """API routes for loan engine."""
 import io
-from datetime import datetime
+import logging
+from datetime import datetime, date
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from fastapi.responses import StreamingResponse
@@ -10,7 +11,8 @@ import pandas as pd
 from pydantic import BaseModel
 
 from db.connection import get_db
-from db.models import PipelineRun, RunStatus, LoanException, LoanFact, User, SalesTeam
+from db.models import PipelineRun, RunStatus, LoanException, LoanFact, User, SalesTeam, Holiday
+from orchestration.pipeline import RunCancelledException
 from auth.security import get_current_user, require_role, require_sales_team_access, UserRole
 from auth.validators import get_user_sales_team_id, validate_sales_team_access
 from auth.audit import log_data_access, log_authorization_failure
@@ -27,7 +29,10 @@ from utils.holiday_calendar import (
     PDATE_COUNTRY,
 )
 from utils.date_utils import calculate_next_tuesday, calculate_pipeline_dates
+from orchestration.tagging_runner import execute_tagging
+from orchestration.final_funding_runner import execute_final_funding_sg, execute_final_funding_cibc
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["api"])
 
 # All notebook-style outputs (mirror February_Baseline + eligibility). Keys must match report keys from pipeline.
@@ -41,6 +46,19 @@ NOTEBOOK_OUTPUT_DEFS = [
     {"key": "eligibility_checks_json", "filename": "eligibility_checks.json", "label": "Eligibility checks (JSON)"},
     {"key": "eligibility_checks_summary", "filename": "eligibility_checks_summary.xlsx", "label": "Eligibility checks summary"},
 ]
+
+
+class ProgramRunCreate(BaseModel):
+    """Program run request (Pre-Funding, Tagging, Final Funding SG, Final Funding CIBC)."""
+    phase: str  # "pre_funding" | "tagging" | "final_funding_sg" | "final_funding_cibc"
+    folder: Optional[str] = None  # optional input folder (local path or S3 prefix); default uses INPUT_DIR / "input"
+
+
+class ProgramRunResponse(BaseModel):
+    """Program run response."""
+    phase: str
+    message: str
+    output_prefix: Optional[str] = None  # e.g. "tagging" for file manager
 
 
 class RunCreate(BaseModel):
@@ -118,6 +136,26 @@ class SummaryResponse(BaseModel):
     eligibility_checks: dict
 
 
+class HolidayBase(BaseModel):
+    """Base holiday fields for admin maintenance."""
+    date: date
+    country: str
+    name: Optional[str] = None
+
+
+class HolidayCreate(HolidayBase):
+    """Create holiday payload."""
+    pass
+
+
+class HolidayResponse(HolidayBase):
+    """Holiday response model."""
+    id: int
+
+    class Config:
+        from_attributes = True
+
+
 def filter_by_sales_team(query, user: User):
     """Filter query by sales team if user is sales team member."""
     if user.role == UserRole.SALES_TEAM and user.sales_team_id:
@@ -126,6 +164,54 @@ def filter_by_sales_team(query, user: User):
         return query  # Admins see all
     else:
         return query  # Analysts see all for now
+
+
+@router.post("/program-run", response_model=ProgramRunResponse)
+async def create_program_run(
+    body: ProgramRunCreate,
+    current_user: User = Depends(get_current_user),
+):
+    """Run a program phase: Pre-Funding (use pipeline/run), Tagging, Final Funding SG, or Final Funding CIBC."""
+    if body.phase == "pre_funding":
+        raise HTTPException(
+            status_code=400,
+            detail="Use POST /api/pipeline/run for Pre-Funding. The Program Runs UI calls that when you click Pre-Funding.",
+        )
+    if body.phase == "tagging":
+        try:
+            output_prefix = execute_tagging()
+            return ProgramRunResponse(
+                phase="tagging",
+                message="Tagging completed. Outputs are in the output directory under tagging/.",
+                output_prefix=output_prefix,
+            )
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Tagging failed: {str(e)}") from e
+    if body.phase == "final_funding_sg":
+        try:
+            output_prefix = execute_final_funding_sg(folder=body.folder)
+            return ProgramRunResponse(
+                phase="final_funding_sg",
+                message="Final Funding SG completed. Outputs are in the output directory under final_funding_sg/.",
+                output_prefix=output_prefix,
+            )
+        except FileNotFoundError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Final Funding SG failed: {str(e)}") from e
+    if body.phase == "final_funding_cibc":
+        try:
+            output_prefix = execute_final_funding_cibc(folder=body.folder)
+            return ProgramRunResponse(
+                phase="final_funding_cibc",
+                message="Final Funding CIBC completed. Outputs are in the output directory under final_funding_cibc/.",
+                output_prefix=output_prefix,
+            )
+        except FileNotFoundError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Final Funding CIBC failed: {str(e)}") from e
+    raise HTTPException(status_code=400, detail=f"Unknown phase: {body.phase}")
 
 
 @router.get("/config")
@@ -183,16 +269,77 @@ async def get_next_posting_date(
     }
 
 
+# ---------- Admin-maintained holiday records (CRUD, admin-only) ----------
+@router.get("/admin/holidays", response_model=List[HolidayResponse])
+async def list_admin_holidays(
+    country: Optional[str] = Query(None, description="Filter by country code"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role([UserRole.ADMIN])),
+):
+    """List maintained holiday records (admin only), optionally filtered by country."""
+    query = db.query(Holiday)
+    if country:
+        query = query.filter(Holiday.country == country)
+    holidays = query.order_by(Holiday.country.asc(), Holiday.date.asc()).all()
+    return holidays
+
+
+@router.post("/admin/holidays", response_model=HolidayResponse)
+async def create_admin_holiday(
+    holiday_in: HolidayCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role([UserRole.ADMIN])),
+):
+    """Create a new maintained holiday (admin only)."""
+    holiday = Holiday(
+        country=holiday_in.country,
+        date=holiday_in.date,
+        name=holiday_in.name,
+    )
+    db.add(holiday)
+    db.commit()
+    db.refresh(holiday)
+    return holiday
+
+
+@router.delete("/admin/holidays/{holiday_id}", status_code=204)
+async def delete_admin_holiday(
+    holiday_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role([UserRole.ADMIN])),
+):
+    """Delete a maintained holiday (admin only)."""
+    holiday = db.query(Holiday).filter(Holiday.id == holiday_id).first()
+    if not holiday:
+        raise HTTPException(status_code=404, detail="Holiday not found")
+    db.delete(holiday)
+    db.commit()
+    return Response(status_code=204)
+
+
 @router.post("/pipeline/run", response_model=RunResponse)
 async def create_pipeline_run(
     run_data: RunCreate,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_sales_team_access())
 ):
-    """Create and execute a new pipeline run."""
+    """Create and execute a new pipeline run. Blocks if another run is already RUNNING (jobs run sequentially)."""
+    # Block if any run is already in RUNNING state (sequential jobs only)
+    running_query = db.query(PipelineRun).filter(PipelineRun.status == RunStatus.RUNNING)
+    running_query = filter_by_sales_team(running_query, current_user)
+    existing_running = running_query.first()
+    if existing_running:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Another run is already in progress ({existing_running.run_id}). "
+                "Jobs must run in sequence. Wait for it to finish or cancel it before starting a new run."
+            ),
+        )
+
     # Get sales team ID (enforced for SALES_TEAM users)
     sales_team_id = get_user_sales_team_id(current_user) if current_user.role == UserRole.SALES_TEAM else None
-    
+
     # Create run context
     context = RunContext.create(
         sales_team_id=sales_team_id,
@@ -201,7 +348,8 @@ async def create_pipeline_run(
         irr_target=run_data.irr_target,
         tday=run_data.tday,
     )
-    
+    logger.info("Pipeline run starting run_id=%s user_id=%s pdate=%s", context.run_id, current_user.id, context.pdate)
+
     # Add sales team ID to file paths for isolation.
     # Inputs go to input directory; outputs go to output directory.
     # At the start of a run, the previous run is archived; at the end, the current run is archived.
@@ -223,20 +371,22 @@ async def create_pipeline_run(
             input_prefix=prev_run.input_file_path,
         )
     
-    # When using S3, run reads from bucket/input/input/files_required/ (inputs area = bucket/input/, prefix "input").
+    # When using S3, run reads from the inputs area root: bucket/input/files_required/ (prefix "" = root of inputs).
     temp_dir = None
     if settings.STORAGE_TYPE == "s3":
-        s3_prefix = "input"  # under inputs area (bucket/input/) -> bucket/input/input/files_required/
+        s3_prefix = ""  # root of inputs area -> bucket/input/files_required/
         try:
+            logger.info("Pipeline run run_id=%s syncing S3 inputs (prefix=%s)", context.run_id, s3_prefix or "(root)")
             input_storage = get_storage_backend(area="inputs")
             temp_dir = sync_s3_input_to_temp(input_storage, s3_prefix)
             folder_for_run = temp_dir
+            logger.info("Pipeline run run_id=%s S3 sync complete, starting execution", context.run_id)
         except FileNotFoundError as e:
             raise HTTPException(
                 status_code=400,
                 detail=(
-                    "No files found in input/input/files_required/ (s3://bucket/input/input/files_required/). "
-                    "Upload files in File Manager to path 'input/files_required' (default). Then start the run again."
+                    "No files found in inputs area (files_required/). "
+                    "Upload files in File Manager to path 'files_required/' (default). Then start the run again."
                 ),
             ) from e
         except Exception as e:
@@ -250,13 +400,24 @@ async def create_pipeline_run(
     try:
         with PipelineExecutor(context) as executor:
             result = executor.execute(folder_for_run)
-        
+
         # Get updated run record
         run_record = db.query(PipelineRun).filter(PipelineRun.run_id == context.run_id).first()
+        logger.info("Pipeline run run_id=%s completed successfully", context.run_id)
         return run_record
-        
+
+    except RunCancelledException:
+        run_record = db.query(PipelineRun).filter(PipelineRun.run_id == context.run_id).first()
+        if run_record:
+            return run_record
+        raise HTTPException(status_code=500, detail="Run was cancelled but run record not found")
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Pipeline execution failed: {str(e)}")
+        logger.exception("Pipeline run run_id=%s failed: %s", context.run_id, e)
+        detail = (
+            f"Pipeline execution failed: {str(e)}. run_id={context.run_id}. "
+            "Check application logs (e.g. AWS CloudWatch log group for this environment, e.g. /ecs/loan-engine-qa) for details."
+        )
+        raise HTTPException(status_code=500, detail=detail) from e
     finally:
         if temp_dir:
             remove_temp_input_dir(temp_dir)
@@ -320,6 +481,34 @@ async def get_run(
     # Log data access
     log_data_access(current_user, 'pipeline_run', run_id, sales_team_id=run.sales_team_id)
     
+    return run
+
+
+@router.post("/runs/{run_id}/cancel", response_model=RunResponse)
+async def cancel_run(
+    run_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Cancel a running pipeline run. Jobs run sequentially; cancelling frees the slot for a new run."""
+    query = db.query(PipelineRun).filter(PipelineRun.run_id == run_id)
+    query = filter_by_sales_team(query, current_user)
+    run = query.first()
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+    if run.status != RunStatus.RUNNING:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Run is not running (status={run.status}). Only runs in 'running' state can be cancelled.",
+        )
+    run.status = RunStatus.CANCELLED
+    run.completed_at = datetime.utcnow()
+    err_list = list(run.errors) if run.errors else []
+    err_list.append("Cancelled by user")
+    run.errors = err_list
+    db.commit()
+    db.refresh(run)
+    logger.info("Pipeline run run_id=%s cancelled by user_id=%s", run_id, current_user.id)
     return run
 
 

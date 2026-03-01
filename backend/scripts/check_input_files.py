@@ -59,7 +59,7 @@ def check_input_files(folder: str = None):
         "MASTER_SHEET.xlsx": "Master sheet (required)",
         "MASTER_SHEET - Notes.xlsx": "Master sheet notes (required)",
         "current_assets.csv": "Current assets (required)",
-        "Underwriting_Grids_COMAP.xlsx": "Underwriting grids (required)",
+        "Underwriting_Grids_COMAP.xlsx": "Underwriting grids (required; baseline sheet names: SFY, Prime, SFY/Prime - Notes, SFY COMAP, SFY COMAP2, Prime COMAP, Prime CoMAP - New, Notes CoMAP, *-Oct25 variants)",
     }
     
     optional_files = {

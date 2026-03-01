@@ -71,6 +71,12 @@ class Settings(BaseSettings):
     # Pipeline
     IRR_TARGET: float = 8.05
     DEFAULT_PDATE: Optional[str] = None
+
+    # Program runs: optional path to external tagging script (e.g. c:\temp\tagging.py). Uses inputs dir and writes to outputs/tagging/.
+    TAGGING_SCRIPT_PATH: Optional[str] = None
+    # Final funding: paths to workbook scripts. Scripts receive FOLDER (temp dir with files_required/); they write to FOLDER/output and FOLDER/output_share; we copy to outputs/final_funding_sg|cibc/.
+    FINAL_FUNDING_SG_SCRIPT_PATH: Optional[str] = None
+    FINAL_FUNDING_CIBC_SCRIPT_PATH: Optional[str] = None
     
     # Scheduler
     ENABLE_SCHEDULER: bool = True

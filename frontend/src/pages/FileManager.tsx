@@ -8,7 +8,7 @@ interface FileInfo {
   last_modified: string | null
 }
 
-const S3_DEFAULT_UPLOAD_PATH = 'input/files_required/'
+const S3_DEFAULT_UPLOAD_PATH = 'files_required/'
 
 export default function FileManager() {
   const [area, setArea] = useState<'inputs' | 'outputs'>('inputs')
@@ -23,7 +23,7 @@ export default function FileManager() {
       .get('/api/config')
       .then((r) => {
         if ((r.data?.storage_type ?? 'local') === 's3') {
-          // For S3 inputs, default to input/files_required/ so uploads go where the pipeline reads.
+          // For S3 inputs, default to files_required/ so uploads go where the pipeline reads.
           if (area === 'inputs') {
             setCurrentPath(S3_DEFAULT_UPLOAD_PATH)
           }
@@ -216,7 +216,7 @@ export default function FileManager() {
         </div>
         {area === 'inputs' ? (
           <div className="text-xs text-gray-500 mt-1">
-            Input area — files go to input/files_required/ (S3: bucket/input/input/files_required/). Pipeline reads from there.
+            Input area — files go to files_required/ (S3: bucket/input/files_required/). Pipeline reads from there.
           </div>
         ) : (
           <div className="text-xs text-gray-500 mt-1">

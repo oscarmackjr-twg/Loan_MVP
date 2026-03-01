@@ -55,7 +55,7 @@ def get_storage_backend(
             raise ValueError("S3_BUCKET_NAME must be set when using S3 storage")
 
         # Default S3 prefix: <S3_BASE_PREFIX>/<area> (inputs, outputs, output_share, archive)
-        # Inputs area uses S3_INPUTS_PREFIX so bucket can be s3://bucket/input/... (e.g. loan-engine-poc/input/input/files_required/)
+        # Inputs area uses S3_INPUTS_PREFIX so bucket can be s3://bucket/input/... (e.g. bucket/input/files_required/)
         if base_path is None:
             if area == "inputs":
                 base_path = _join_prefix(settings.S3_BASE_PREFIX or "", getattr(settings, "S3_INPUTS_PREFIX", "input"))

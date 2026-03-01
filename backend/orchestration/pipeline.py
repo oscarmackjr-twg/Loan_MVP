@@ -36,6 +36,11 @@ logger = logging.getLogger(__name__)
 WEEKDAY_NAMES = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
 
 
+class RunCancelledException(Exception):
+    """Raised when a run was cancelled by the user (status set to CANCELLED in DB)."""
+    pass
+
+
 def _weekday_from_pdate(pdate: str):
     """Return (weekday_index 0-6, weekday_name) from pdate YYYY-MM-DD."""
     try:
@@ -60,11 +65,14 @@ class PipelineExecutor:
         self.db.close()
     
     def load_reference_data(self, folder: str) -> Dict[str, pd.DataFrame]:
-        """Load all reference data files."""
+        """Load all reference data files.
+        Input file and worksheet names align with baseline:
+        loan_engine/inputs/93rd_buy/bin/all_in_one_file_Wed.py
+        """
         data = {}
         
         try:
-            # Load master sheets
+            # Load master sheets (MASTER_SHEET.xlsx, MASTER_SHEET - Notes.xlsx, current_assets.csv)
             data['loans_types'] = pd.read_excel(f"{folder}/files_required/MASTER_SHEET.xlsx")
             data['notes'] = pd.read_excel(f"{folder}/files_required/MASTER_SHEET - Notes.xlsx")
             data['existing_file'] = pd.read_csv(f"{folder}/files_required/current_assets.csv")
@@ -76,10 +84,14 @@ class PipelineExecutor:
             data['underwriting_sfy_notes'] = pd.read_excel(underwriting_file, sheet_name='SFY - Notes')
             data['underwriting_prime_notes'] = pd.read_excel(underwriting_file, sheet_name='Prime - Notes')
             
-            # Load CoMAP grids (match February_Baseline notebook sheets)
+            # Load CoMAP grids (match all_in_one_file_Wed / 93rd_buy baseline sheet names)
             data['sfy_comap'] = pd.read_excel(underwriting_file, sheet_name='SFY COMAP')
             data['sfy_comap2'] = pd.read_excel(underwriting_file, sheet_name='SFY COMAP2')
-            data['prime_comap'] = pd.read_excel(underwriting_file, sheet_name='Prime CoMAP')
+            # Baseline uses 'Prime COMAP'; accept both for compatibility
+            try:
+                data['prime_comap'] = pd.read_excel(underwriting_file, sheet_name='Prime COMAP')
+            except Exception:
+                data['prime_comap'] = pd.read_excel(underwriting_file, sheet_name='Prime CoMAP')
             data['notes_comap'] = pd.read_excel(underwriting_file, sheet_name='Notes CoMAP')
             # Oct25 variants (notebook: SFY COMAP-Oct25, SFY COMAP-Oct25-2, Prime CoMAP-Oct25, Prime CoMAP-Oct25-2)
             try:
@@ -103,10 +115,10 @@ class PipelineExecutor:
             except Exception:
                 data['prime_comap_new'] = data['prime_comap'].copy()
             
-            logger.info("Reference data loaded successfully")
-            
+            logger.info("Reference data loaded successfully run_id=%s", self.context.run_id)
+
         except Exception as e:
-            logger.error(f"Error loading reference data: {e}")
+            logger.error("Error loading reference data run_id=%s: %s", self.context.run_id, e, exc_info=True)
             raise
         
         return data
@@ -150,10 +162,10 @@ class PipelineExecutor:
             else:
                 raise FileNotFoundError("PRIME file not found")
             
-            logger.info(f"Input files loaded successfully from {folder}")
-            
+            logger.info("Input files loaded successfully run_id=%s from %s", self.context.run_id, folder)
+
         except Exception as e:
-            logger.error(f"Error loading input files: {e}")
+            logger.error("Error loading input files run_id=%s: %s", self.context.run_id, e, exc_info=True)
             raise
         
         return files
@@ -197,8 +209,18 @@ class PipelineExecutor:
             
             self.db.commit()
 
+    def _check_cancelled(self) -> None:
+        """If run was cancelled via API, raise so execution stops. Call at phase boundaries."""
+        if not self.run_record:
+            return
+        self.db.refresh(self.run_record)
+        if self.run_record.status == RunStatus.CANCELLED:
+            logger.info("Pipeline run_id=%s was cancelled, stopping", self.context.run_id)
+            raise RunCancelledException("Run was cancelled by user")
+
     def _set_phase(self, phase: str) -> None:
-        """Record the current pipeline phase (for diagnosing stuck runs: data vs code)."""
+        """Record the current pipeline phase (for diagnosing stuck runs: data vs code). Checks for cancellation."""
+        self._check_cancelled()
         if self.run_record and hasattr(self.run_record, "last_phase"):
             self.run_record.last_phase = phase
             self.db.commit()
@@ -270,16 +292,20 @@ class PipelineExecutor:
     
     def execute(self, folder: str) -> Dict[str, Any]:
         """Execute the full pipeline."""
+        run_id = self.context.run_id
         try:
+            logger.info("Pipeline execute starting run_id=%s folder=%s", run_id, folder)
             # Create run record
             self.create_run_record()
             self.update_run_status(RunStatus.RUNNING)
             self._set_phase("load_reference_data")
-            
+
             # Load data
             ref_data = self.load_reference_data(folder)
+            logger.info("Pipeline run_id=%s load_reference_data done", run_id)
             self._set_phase("load_input_files")
             input_files = self.load_input_files(folder)
+            logger.info("Pipeline run_id=%s load_input_files done", run_id)
             
             self._set_phase("normalize_loans")
             # Process loans
@@ -529,7 +555,14 @@ class PipelineExecutor:
             logger.info(f"Pipeline completed successfully: {self.context.run_id}")
             return result
             
+        except RunCancelledException:
+            # Run was cancelled; status already set to CANCELLED by API, do not overwrite
+            raise
         except Exception as e:
-            logger.error(f"Pipeline execution failed: {e}", exc_info=True)
+            last_phase = getattr(self.run_record, "last_phase", None) if self.run_record else None
+            logger.error(
+                "Pipeline execution failed run_id=%s last_phase=%s: %s",
+                run_id, last_phase, e, exc_info=True
+            )
             self.update_run_status(RunStatus.FAILED, errors=[str(e)])
             raise

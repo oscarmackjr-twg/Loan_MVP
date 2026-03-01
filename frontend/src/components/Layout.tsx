@@ -5,13 +5,26 @@ export default function Layout() {
   const { user, logout } = useAuth()
   const location = useLocation()
 
-  const navItems = [
+  const baseNavItems = [
     { path: '/dashboard', label: 'Dashboard' },
+    { path: '/program-runs', label: 'Program Runs' },
     { path: '/runs', label: 'Pipeline Runs' },
     { path: '/exceptions', label: 'Exceptions' },
     { path: '/rejected-loans', label: 'Rejected Loans' },
     { path: '/files', label: 'File Manager' },
   ]
+
+  const adminNavItems =
+    user?.role === 'admin'
+      ? [
+          {
+            path: '/holidays',
+            label: 'Holiday Maintenance',
+          },
+        ]
+      : []
+
+  const navItems = [...baseNavItems, ...adminNavItems]
 
   return (
     <div className="min-h-screen bg-gray-50">

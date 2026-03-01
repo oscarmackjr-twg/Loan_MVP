@@ -1,10 +1,12 @@
 # Application Load Balancer
+# idle_timeout: pre-funding runs can take several minutes; default 60s causes 502 when ALB closes the connection
 resource "aws_lb" "main" {
   name               = "${local.name_prefix}-alb"
   internal           = false
   load_balancer_type = "application"
   security_groups    = [aws_security_group.alb.id]
   subnets            = aws_subnet.public[*].id
+  idle_timeout       = 900 # 15 minutes for long pipeline runs
   tags               = { Name = "${local.name_prefix}-alb" }
 }
 

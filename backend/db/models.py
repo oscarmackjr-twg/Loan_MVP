@@ -1,7 +1,16 @@
 """Database models for the loan engine."""
 from sqlalchemy import (
-    Column, Integer, String, Float, Boolean, DateTime, 
-    ForeignKey, Text, JSON, Enum as SQLEnum
+    Column,
+    Integer,
+    String,
+    Float,
+    Boolean,
+    DateTime,
+    Date,
+    ForeignKey,
+    Text,
+    JSON,
+    Enum as SQLEnum,
 )
 from sqlalchemy.orm import relationship
 from datetime import datetime
@@ -170,3 +179,18 @@ class LoanFact(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     
     run = relationship("PipelineRun")
+
+
+class Holiday(Base):
+    """Maintained holiday calendar entries (admin-managed)."""
+
+    __tablename__ = "holidays"
+
+    id = Column(Integer, primary_key=True, index=True)
+    country = Column(String(4), nullable=False, index=True)  # ISO country code (US, IN, GB, SG, etc.)
+    date = Column(Date, nullable=False, index=True)
+    name = Column(String(255), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    # Ensure country/date pairs are logically unique at the application level; DB uniqueness can be added via migrations.

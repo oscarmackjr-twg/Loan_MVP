@@ -59,7 +59,7 @@ These files should be in `files_required/` and don't use date patterns:
 - `MASTER_SHEET.xlsx`
 - `MASTER_SHEET - Notes.xlsx`
 - `current_assets.csv`
-- `Underwriting_Grids_COMAP.xlsx`
+- `Underwriting_Grids_COMAP.xlsx` — workbook must contain these sheets (aligned with baseline `loan_engine/inputs/93rd_buy/bin/all_in_one_file_Wed.py`): **SFY**, **Prime**, **SFY - Notes**, **Prime - Notes**, **SFY COMAP**, **SFY COMAP2**, **Prime COMAP** (or **Prime CoMAP**), **Prime CoMAP - New**, **Notes CoMAP**, **SFY COMAP-Oct25**, **SFY COMAP-Oct25-2**, **Prime CoMAP-Oct25**, **Prime CoMAP-Oct25-2**. Optional sheets may be omitted; the pipeline falls back to the main grid if an Oct25 variant is missing.
 
 ### FX Files (Optional)
 
